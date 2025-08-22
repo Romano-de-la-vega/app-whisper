@@ -1,0 +1,26 @@
+# Environnements virtuels
+.venv*/
+venv/
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/
+
+# Logs et fichiers temporaires
+*.log
+tmp/
+transcriptions/
+uploads/
+
+# Build / distribution
+build/
+dist/
+*.spec
+
+# Exécutables
+ffmpeg.exe
+ffprobe.exe
+
+# Divers
+*.rc
