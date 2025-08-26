@@ -111,14 +111,19 @@
       /* Bouton thème header */
       .header-row { display:flex; justify-content: space-between; align-items:center; gap: 12px; }
       #toggle-theme { min-width: 160px; }
+      .branding { display:flex; align-items:center; gap: 12px; }
+      .branding img { height:40px; }
     </style>
   </head>
   <body>
     <header class="container">
       <div class="header-row">
-        <div>
-          <h1>Transcripteur mp3 → txt via Whisper</h1>
-          <p class="subtitle">Lot de fichiers · Local ou API OpenAI</p>
+        <div class="branding">
+          <img id="logo" src="/static/logo.png" alt="Logo" />
+          <div>
+            <h1>Transcripteur mp3 → txt via Whisper</h1>
+            <p class="subtitle">Lot de fichiers · Local ou API OpenAI</p>
+          </div>
         </div>
         <button id="toggle-theme" type="button">🌙 Mode sombre</button>
       </div>
