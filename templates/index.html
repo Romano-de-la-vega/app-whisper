@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="fr" data-theme="light">
+<html lang="fr" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -10,7 +10,8 @@
     <style>
       /* Thèmes via variables CSS (persistées avec data-theme sur <html>) */
       :root[data-theme="dark"] {
-        --bg: #0f1115;
+        /* Dégradé plus contrasté pour la version sombre */
+        --bg: linear-gradient(145deg, #0f1115 0%, #1b2233 100%);
         --card: #151821;
         --text: #e6e7ee;
         --muted: #9aa0aa;
@@ -111,20 +112,24 @@
       /* Bouton thème header */
       .header-row { display:flex; justify-content: space-between; align-items:center; gap: 12px; }
       #toggle-theme { min-width: 160px; }
+      .brand { display:flex; align-items:center; gap:8px; font-weight:600; }
+      .brand img { height:32px; }
     </style>
   </head>
   <body>
     <header class="container">
       <div class="header-row">
-        <div>
-          <h1>Transcripteur mp3 → txt via Whisper</h1>
-          <p class="subtitle">Lot de fichiers · Local ou API OpenAI</p>
+        <div class="brand">
+          <img src="/static/logo.png" alt="Logo" />
+          <span>Argain Consulting Innovation</span>
         </div>
         <button id="toggle-theme" type="button">🌙 Mode sombre</button>
       </div>
     </header>
 
     <main class="container card">
+      <h1>Transcription mp3 → txt via Whisper</h1>
+      <p class="subtitle">Lot de fichiers · Local ou API OpenAI</p>
       <form id="form" class="grid">
         <div class="field">
           <label for="mode">Mode de transcription</label>

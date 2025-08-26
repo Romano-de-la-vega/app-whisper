@@ -31,6 +31,8 @@ let pollTimer = null;
 let currentJobId = null;
 let lastLogLength = 0;
 let isRunning = false;
+// Exposer l'identifiant du job pour les gestionnaires inline
+window.currentJobId = currentJobId;
 
 // ====== Config serveur ======
 (function initConfig() {
@@ -46,16 +48,18 @@ let isRunning = false;
 // ====== Thème (persistance localStorage) ======
 (function initTheme() {
   const root = document.documentElement;
-  const saved = localStorage.getItem("theme") || "light";
+  const saved = localStorage.getItem("theme") || "dark";
   root.setAttribute("data-theme", saved);
-  themeBtn.textContent = saved === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
 
-  themeBtn.addEventListener("click", () => {
-    const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
-    root.setAttribute("data-theme", next);
-    localStorage.setItem("theme", next);
-    themeBtn.textContent = next === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
-  });
+  if (themeBtn) {
+    themeBtn.textContent = saved === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
+    themeBtn.addEventListener("click", () => {
+      const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      localStorage.setItem("theme", next);
+      themeBtn.textContent = next === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
+    });
+  }
 })();
 
 // ====== Options ======
@@ -247,6 +251,7 @@ form.addEventListener("submit", async (e) => {
     const data = await res.json();
 
     currentJobId = data.job_id;
+    window.currentJobId = currentJobId;
     jobIdSpan.textContent = `Job : ${currentJobId}`;
     jobStateSpan.textContent = "en cours";
     startBtn.disabled = false;   // on autorise l'arrêt (UI) maintenant que le job existe
@@ -266,6 +271,7 @@ resetBtn.addEventListener("click", () => {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
   currentJobId = null;
+  window.currentJobId = null;
   lastLogLength = 0;
   isRunning = false;
 
