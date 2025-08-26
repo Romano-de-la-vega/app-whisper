@@ -1,130 +1,31 @@
 <!doctype html>
-<html lang="fr" data-theme="light">
+<html lang="fr">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Transcripteur Whisper</title>
+    <script>
+      (function () {
+        const saved = localStorage.getItem('theme');
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.setAttribute('data-theme', saved || (prefersDark ? 'dark' : 'light'));
+      })();
+    </script>
     <link rel="stylesheet" href="/static/style.css" />
     <link rel="icon" href="/static/icon.ico" type="image/x-icon">
-
-    <style>
-      /* Thèmes via variables CSS (persistées avec data-theme sur <html>) */
-      :root[data-theme="dark"] {
-        --bg: #0f1115;
-        --card: #151821;
-        --text: #e6e7ee;
-        --muted: #9aa0aa;
-        --accent: #6ea8fe;
-        --accent-2: #84e1bc;
-        --border: #2a2f3a;
-        --btn-fg: #0c0e13;
-      }
-      :root[data-theme="light"] {
-        --bg: #f6f7fb;
-        --card: #ffffff;
-        --text: #151821;
-        --muted: #5b6472;
-        --accent: #2f6df6;
-        --accent-2: #25b78b;
-        --border: #e4e7ee;
-        --btn-fg: #ffffff;
-      }
-
-      html, body { height: 100%; }
-      [hidden] { display: none !important; }
-      body {
-        margin: 0;
-        background: var(--bg);
-        color: var(--text);
-        font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial;
-      }
-      .container {
-        width: 100%;
-        max-width: 980px;
-        margin: 32px auto;
-        padding: 0 16px;
-      }
-      h1 { font-size: 28px; margin: 0 0 6px; letter-spacing: .2px; }
-      .subtitle { color: var(--muted); margin: 0; }
-
-      .card {
-        background: var(--card);
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        box-shadow: 0 10px 30px rgba(0,0,0,.15);
-        padding: 20px;
-      }
-
-      .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
-      .field { grid-column: span 6; display: flex; flex-direction: column; gap: 6px; }
-      .field.full { grid-column: 1 / -1; }
-      label { color: var(--muted); font-size: 14px; }
-      select, input[type="file"], input[type="password"] {
-        padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border);
-        background: transparent; color: var(--text);
-      }
-      small { color: var(--muted); }
-
-      .actions { grid-column: 1 / -1; display: flex; gap: 10px; margin-top: 8px; }
-
-      button, .button {
-        display: inline-flex; align-items: center; justify-content: center;
-        padding: 10px 14px; border-radius: 10px; border: 1px solid transparent;
-        background: var(--accent); color: var(--btn-fg); font-weight: 600; cursor: pointer; text-decoration: none;
-      }
-      button.ghost { background: transparent; border-color: var(--border); color: var(--text); }
-      button.danger { background: #e5484d; color: #fff; }
-
-      .status { margin-top: 18px; }
-      .progress-wrap {
-        height: 10px; border-radius: 999px; background: transparent; border: 1px solid var(--border);
-        overflow: hidden;
-      }
-      .progress {
-        height: 100%; width: 0%;
-        background: linear-gradient(90deg, var(--accent), var(--accent-2));
-        transition: width .25s ease;
-      }
-      .meta { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; color: var(--muted); }
-      .badge {
-        display: inline-block; padding: 4px 8px; border-radius: 999px; background: transparent; border: 1px solid var(--border);
-        color: var(--text); font-size: 12px;
-      }
-
-      .files-list { margin-top: 14px; display: grid; gap: 10px; }
-      .file-row {
-        display: grid; gap: 8px; background: transparent; border: 1px solid var(--border); border-radius: 12px; padding: 10px;
-      }
-      .file-row .name { font-weight: 600; }
-      .file-row .row-progress { height: 6px; background: transparent; border:1px solid var(--border); border-radius:999px; overflow:hidden; }
-      .file-row .row-progress > div { height:100%; width:0%; background: linear-gradient(90deg, var(--accent-2), var(--accent)); transition: width .25s ease; }
-      .file-row .state { font-size: 12px; color: var(--muted); }
-
-      .logs {
-        margin-top: 16px; max-height: 320px; overflow: auto;
-        background: transparent; border: 1px solid var(--border); border-radius: 12px; padding: 12px;
-        white-space: pre-wrap; word-break: break-word;
-      }
-
-      footer.muted { color: var(--muted); text-align: center; margin-bottom: 24px; }
-
-      /* Bouton thème header */
-      .header-row { display:flex; justify-content: space-between; align-items:center; gap: 12px; }
-      #toggle-theme { min-width: 160px; }
-    </style>
   </head>
   <body>
-    <header class="container">
-      <div class="header-row">
-        <div>
-          <h1>Transcripteur mp3 → txt via Whisper</h1>
-          <p class="subtitle">Lot de fichiers · Local ou API OpenAI</p>
-        </div>
+    <header class="header">
+      <div class="container header-row">
+        <img id="logo" src="/static/logo.png" alt="Logo" height="28" />
         <button id="toggle-theme" type="button">🌙 Mode sombre</button>
       </div>
     </header>
 
     <main class="container card">
+      <h1>Transcripteur mp3 → txt via Whisper</h1>
+      <p class="subtitle">Lot de fichiers · Local ou API OpenAI</p>
+
       <form id="form" class="grid">
         <div class="field">
           <label for="mode">Mode de transcription</label>
@@ -172,7 +73,9 @@
       </form>
 
       <section id="status" class="status" hidden>
-        <div class="progress-wrap"><div class="progress" id="progress" style="width:0%"></div></div>
+        <div class="progress-wrap">
+          <div class="progress" id="progress" style="width:0%"></div>
+        </div>
         <div class="meta">
           <span id="job-id"></span>
           <span id="job-state" class="badge">en attente</span>
@@ -182,7 +85,6 @@
         <pre id="logs" class="logs"></pre>
 
         <div id="downloads" class="actions" style="gap:.5rem;" hidden>
-
           <button class="button ghost" id="btn-transcription" onclick="downloadTxt(currentJobId, 'transcription', true)">Télécharger la transcription (TXT)</button>
           <button class="button ghost" id="btn-summary" style="display:none;" onclick="downloadTxt(currentJobId, 'summary', true)">Télécharger le résumé (TXT)</button>
           <button class="button" id="btn-zip" onclick="downloadZip(currentJobId)">Télécharger en ZIP</button>
