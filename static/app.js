@@ -46,7 +46,7 @@ let isRunning = false;
 // ====== Thème (persistance localStorage) ======
 (function initTheme() {
   const root = document.documentElement;
-  const saved = localStorage.getItem("theme") || "light";
+  const saved = localStorage.getItem("theme") || "dark";
   root.setAttribute("data-theme", saved);
   themeBtn.textContent = saved === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
 
