@@ -22,6 +22,7 @@ const downloadWrap = document.getElementById("downloads");
 const summaryBtn = document.getElementById("btn-summary");
 
 const themeBtn = document.getElementById("toggle-theme");
+const logo = document.getElementById("logo");
 
 // Masquer les boutons de téléchargement tant que la transcription n'est pas terminée
 downloadWrap.hidden = true;
@@ -46,15 +47,19 @@ let isRunning = false;
 // ====== Thème (persistance localStorage) ======
 (function initTheme() {
   const root = document.documentElement;
-  const saved = localStorage.getItem("theme") || "light";
-  root.setAttribute("data-theme", saved);
-  themeBtn.textContent = saved === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
+  const saved = localStorage.getItem("theme");
+  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const current = saved || (prefersDark ? "dark" : "light");
+  root.setAttribute("data-theme", current);
+  themeBtn.textContent = current === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
+  if (logo) logo.src = current === "dark" ? "/static/logo_white.png" : "/static/logo.png";
 
   themeBtn.addEventListener("click", () => {
     const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
     root.setAttribute("data-theme", next);
     localStorage.setItem("theme", next);
     themeBtn.textContent = next === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
+    if (logo) logo.src = next === "dark" ? "/static/logo_white.png" : "/static/logo.png";
   });
 })();
 
@@ -72,8 +77,8 @@ function fillModelOptions() {
     modelSelect.appendChild(opt);
   });
 
-  apiKeyWrap.style.display = useAPI ? "flex" : "none";
-  outputTypeWrap.style.display = useAPI ? "flex" : "none";
+  apiKeyWrap.hidden = !useAPI;
+  outputTypeWrap.hidden = !useAPI;
 }
 function fillLangOptions() {
   langSelect.innerHTML = "";
@@ -154,7 +159,7 @@ async function pollStatus() {
 
     // Assurer l'affichage correct des boutons selon l'état et le mode
     downloadWrap.hidden = job.status !== "done";
-    summaryBtn.style.display = job.use_api ? "inline-flex" : "none";
+    summaryBtn.hidden = !job.use_api;
 
     if (Array.isArray(job.logs)) {
       const slice = job.logs.slice(lastLogLength).join("\n");
@@ -232,7 +237,7 @@ form.addEventListener("submit", async (e) => {
 
   const fd = new FormData();
   const use_api = modeSelect.value === "api";
-  summaryBtn.style.display = use_api ? "inline-flex" : "none";
+  summaryBtn.hidden = !use_api;
   fd.append("use_api", use_api ? "1" : "0");
   fd.append("api_key", (apiKeyInput.value || "").trim());
   fd.append("model_label", modelSelect.value);
@@ -276,7 +281,7 @@ resetBtn.addEventListener("click", () => {
   filesList.innerHTML = "";
   progressBar.style.width = "0%";
   downloadWrap.hidden = true;
-  summaryBtn.style.display = "none";
+  summaryBtn.hidden = true;
 
 
   // Remettre les options par défaut
