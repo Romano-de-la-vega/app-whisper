@@ -22,6 +22,7 @@ const downloadWrap = document.getElementById("downloads");
 const summaryBtn = document.getElementById("btn-summary");
 
 const themeBtn = document.getElementById("toggle-theme");
+const logo = document.getElementById("logo");
 
 // Masquer les boutons de téléchargement tant que la transcription n'est pas terminée
 downloadWrap.hidden = true;
@@ -46,15 +47,19 @@ let isRunning = false;
 // ====== Thème (persistance localStorage) ======
 (function initTheme() {
   const root = document.documentElement;
-  const saved = localStorage.getItem("theme") || "light";
-  root.setAttribute("data-theme", saved);
-  themeBtn.textContent = saved === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
+  const saved = localStorage.getItem("theme");
+  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const current = saved || (prefersDark ? "dark" : "light");
+  root.setAttribute("data-theme", current);
+  themeBtn.textContent = current === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
+  if (logo) logo.src = current === "dark" ? "/static/logo_white.png" : "/static/logo.png";
 
   themeBtn.addEventListener("click", () => {
     const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
     root.setAttribute("data-theme", next);
     localStorage.setItem("theme", next);
     themeBtn.textContent = next === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
+    if (logo) logo.src = next === "dark" ? "/static/logo_white.png" : "/static/logo.png";
   });
 })();
 
