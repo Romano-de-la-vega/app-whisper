@@ -10,6 +10,7 @@
   --accent: #0B1C48;
   --accent-hover: linear-gradient(#0B1C48, #009688);
   --accent-2: #009688;
+  --input-bg: rgba(255, 255, 255, 0.9);
 }
 
 :root[data-theme="dark"] {
@@ -24,6 +25,7 @@
   --accent: #22C1C3;
   --accent-hover: #00796B;
   --accent-2: #00796B;
+  --input-bg: rgba(18, 24, 38, 0.8);
 }
 
 * { box-sizing: border-box; }
@@ -116,7 +118,7 @@ input[type="password"] {
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid var(--panel-border);
-  background: transparent;
+  background: var(--input-bg);
   color: var(--text);
 }
 
