@@ -1,5 +1,5 @@
 :root[data-theme="light"] {
-  --bg-radial: radial-gradient(circle at 50% -20%, #F9FBFF, #EAF4F5);
+  --bg-radial: radial-gradient(circle at 50% -20%, #B2E6EB, #DCE5FF);
   --bg-linear: linear-gradient(#EAF4F5, #DCE5FF);
   --text: #0B1220;
   --muted: #4B5563;
@@ -13,7 +13,7 @@
 }
 
 :root[data-theme="dark"] {
-  --bg-radial: radial-gradient(circle at 50% -20%, #0B1C48, #102B4A);
+  --bg-radial: radial-gradient(circle at 50% -50%, #009688, #102B4A);
   --bg-linear: linear-gradient(#102B4A, #009688);
   --text: #E6ECF2;
   --muted: #AAB4C0;
