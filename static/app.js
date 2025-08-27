@@ -23,6 +23,7 @@ const summaryBtn = document.getElementById("btn-summary");
 
 const themeBtn = document.getElementById("toggle-theme");
 const logoImg = document.getElementById("logo");
+const bodyEl = document.body;
 
 // Masquer les boutons de téléchargement tant que la transcription n'est pas terminée
 downloadWrap.hidden = true;
@@ -32,6 +33,10 @@ let pollTimer = null;
 let currentJobId = null;
 let lastLogLength = 0;
 let isRunning = false;
+
+function setTranscribing(active) {
+  bodyEl.classList.toggle('transcribing', !!active);
+}
 
 // ====== Config serveur ======
 (function initConfig() {
@@ -172,6 +177,7 @@ async function pollStatus() {
       progressBar.style.width = "100%";
       clearInterval(pollTimer); pollTimer = null;
       isRunning = false;
+      setTranscribing(false);
       startBtn.disabled = false;
       startBtn.textContent = "Lancer la transcription";
       startBtn.classList.remove("danger");
@@ -183,6 +189,7 @@ async function pollStatus() {
     console.error(err);
     clearInterval(pollTimer); pollTimer = null;
     isRunning = false;
+    setTranscribing(false);
     startBtn.disabled = false;
     startBtn.textContent = "Lancer la transcription";
     startBtn.classList.remove("danger");
@@ -204,6 +211,7 @@ form.addEventListener("submit", async (e) => {
     // petit délai visuel pour que l'utilisateur voie l'état
     setTimeout(() => {
       isRunning = false;
+      setTranscribing(false);
       startBtn.disabled = false;
       startBtn.textContent = "Lancer la transcription";
       startBtn.classList.remove("danger");
@@ -221,6 +229,7 @@ form.addEventListener("submit", async (e) => {
 
   // lock UI + reset affichages
   isRunning = true;
+  setTranscribing(true);
   startBtn.textContent = "Arrêter la transcription";
   startBtn.classList.add("danger");
   startBtn.disabled = true;      // on le réactive dès que le job démarre
@@ -258,6 +267,7 @@ form.addEventListener("submit", async (e) => {
     console.error(err);
     alert("Erreur au lancement : " + err.message);
     isRunning = false;
+    setTranscribing(false);
     startBtn.disabled = false;
     startBtn.textContent = "Lancer la transcription";
     startBtn.classList.remove("danger");
@@ -271,6 +281,7 @@ resetBtn.addEventListener("click", () => {
   currentJobId = null;
   lastLogLength = 0;
   isRunning = false;
+  setTranscribing(false);
 
   // reset visuel du formulaire
   form.reset();
