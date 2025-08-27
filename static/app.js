@@ -47,10 +47,10 @@ let isRunning = false;
 // ====== Thème (persistance localStorage) ======
 (function initTheme() {
   const root = document.documentElement;
-  const saved = localStorage.getItem("theme") || "light";
-  root.setAttribute("data-theme", saved);
-  themeBtn.textContent = saved === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
-  if (logoImg) logoImg.src = saved === "dark" ? "/static/logo_white.png" : "/static/logo.png";
+  let current = root.getAttribute("data-theme") || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  root.setAttribute("data-theme", current);
+  themeBtn.textContent = current === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
+  if (logoImg) logoImg.src = current === "dark" ? "/static/logo_white.png" : "/static/logo.png";
 
   themeBtn.addEventListener("click", () => {
     const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
