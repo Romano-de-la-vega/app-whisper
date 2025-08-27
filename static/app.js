@@ -49,14 +49,14 @@ let isRunning = false;
   const root = document.documentElement;
   let current = root.getAttribute("data-theme") || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   root.setAttribute("data-theme", current);
-  themeBtn.textContent = current === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
+  themeBtn.textContent = current === "dark" ? "☀️" : "🌙";
   if (logoImg) logoImg.src = current === "dark" ? "/static/logo_white.png" : "/static/logo.png";
 
   themeBtn.addEventListener("click", () => {
     const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
     root.setAttribute("data-theme", next);
     localStorage.setItem("theme", next);
-    themeBtn.textContent = next === "dark" ? "☀️ Mode clair" : "🌙 Mode sombre";
+    themeBtn.textContent = next === "dark" ? "☀️" : "🌙";
     if (logoImg) logoImg.src = next === "dark" ? "/static/logo_white.png" : "/static/logo.png";
   });
 })();
