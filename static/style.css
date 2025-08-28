@@ -37,6 +37,7 @@ body {
   background: var(--bg-radial), var(--bg-linear);
   color: var(--text);
   font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+  position: relative;
 }
 
 .container {
@@ -262,5 +263,41 @@ footer.muted {
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+body.transcribing::before {
+  content: "";
+  position: fixed;
+  top: -150vh;
+  left: -150vw;
+  width: 400vw;
+  height: 400vh;
+  background: var(--bg-radial), var(--bg-linear);
+  animation: bg-rotate 6s linear infinite, bg-pulse 6s ease-in-out infinite;
+  transform-origin: center;
+  z-index: -1;
+  pointer-events: none;
+  filter: brightness(1);
+}
+
+@keyframes bg-rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes bg-pulse {
+  0%, 50% {
+    filter: brightness(1);
+  }
+  25% {
+    filter: brightness(1.3);
+  }
+  75% {
+    filter: brightness(0.7);
+  }
 }
 
