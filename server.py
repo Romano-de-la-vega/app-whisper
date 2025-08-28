@@ -91,6 +91,7 @@ MODELS_LOCAL: Dict[str, str] = {
     "Small": "small",
     "Medium": "medium",
     "Large v3 (CPU lourd)": "large-v3",
+    "Large v3 Turbo (recommandé)": "large-v3-turbo",
 }
 MODELS_CLOUD: List[str] = ["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"]
 
@@ -100,7 +101,7 @@ LANGS: Dict[str, str] = {
     "Arabe": "ar", "Chinois": "zh", "Japonais": "ja",
 }
 DEFAULT_LANG = "Français"
-DEFAULT_MODEL_LOCAL = "Large v3 (CPU lourd)"
+DEFAULT_MODEL_LOCAL = "Large v3 Turbo (recommandé)"
 
 # — prompts selon le format de sortie désiré
 OUTPUT_PROMPTS: Dict[str, str] = {
@@ -128,6 +129,9 @@ MODEL_APPROX_SIZE = {
     "large-v3": 3100 * 1024**2,  # ~3.1 GB
 }
 
+# Approx pour Turbo (si manquant)
+MODEL_APPROX_SIZE.setdefault("large-v3-turbo", 3100 * 1024**2)
+
 # — mapping nom → repo HF faster-whisper
 REPO_MAP = {
     "base": "Systran/faster-whisper-base",
@@ -135,6 +139,11 @@ REPO_MAP = {
     "medium": "Systran/faster-whisper-medium",
     "large-v2": "Systran/faster-whisper-large-v2",
     "large-v3": "Systran/faster-whisper-large-v3",
+    "large-v3-turbo": [
+        "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+        "deepdml/faster-whisper-large-v3-turbo-ct2",
+        "Purfview/faster-whisper-large-v3-turbo",
+    ],
 }
 
 # ========= Patch VAD (local) =========
@@ -519,13 +528,7 @@ def _ensure_local_model_with_progress(job_id: str, model_name: str):
         # (on force le chemin pour qu'il corresponde au nom du modèle)
         local_dir = MODELS_DIR / model_name
         local_dir.mkdir(parents=True, exist_ok=True)
-        snapshot_download(
-            repo_id=repo_id,
-            local_dir=str(local_dir),
-            local_dir_use_symlinks=False,
-            resume_download=True,
-            allow_patterns="*",
-        )
+        _snapshot_try_candidates(job_id, repo_id, str(local_dir))
         # petit flush final
         size = _dir_size_bytes(target_dir)
         append_log(job_id, f"Téléchargement modèle : 100% ({_fmt_size(size)})")
@@ -545,6 +548,33 @@ def _fmt_size(n: int) -> str:
             return f"{n:.0f} {unit}"
         n /= 1024
     return f"{n:.0f} PB"
+
+def _snapshot_try_candidates(job_id: str, repo_or_list, local_dir: str) -> None:
+    """Essaye une ou plusieurs URLs HF jusqu'à succès, sinon relance la dernière erreur."""
+    if snapshot_download is None:
+        raise RuntimeError("huggingface_hub indisponible")
+    if isinstance(repo_or_list, (list, tuple)):
+        candidates = list(repo_or_list)
+    else:
+        candidates = [str(repo_or_list)]
+
+    last_err = None
+    for rid in candidates:
+        try:
+            append_log(job_id, f"Essai du repo: {rid}")
+            snapshot_download(
+                repo_id=rid,
+                local_dir=local_dir,
+                local_dir_use_symlinks=False,
+                resume_download=True,
+                allow_patterns="*",
+            )
+            return
+        except Exception as e:
+            last_err = e
+            append_log(job_id, f"[WARN] Echec repo {rid} : {e}")
+    if last_err is not None:
+        raise last_err
 
 # ========= Helpers thread-safe =========
 def with_job(job_id: str, fn):
