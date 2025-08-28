@@ -22,12 +22,28 @@ const downloadWrap = document.getElementById("downloads");
 const summaryBtn = document.getElementById("btn-summary");
 const estimateNode = document.getElementById("estimate");
 
+const OUTPUT_LABELS = {
+  resume: "Télécharger le résumé (TXT)",
+  compte_rendu: "Télécharger le compte rendu (TXT)",
+  note_de_cadrage: "Télécharger la note de cadrage (TXT)",
+  cahier_des_charges: "Télécharger le cahier des charges (TXT)",
+  procedure_technique: "Télécharger la procédure (TXT)",
+  rapport_analyse: "Télécharger le rapport d'analyse (TXT)",
+  support_formation: "Télécharger le support de formation (TXT)",
+};
+
 const themeBtn = document.getElementById("toggle-theme");
 const logoImg = document.getElementById("logo");
 const bodyEl = document.body;
 
 // Masquer les boutons de téléchargement tant que la transcription n'est pas terminée
 downloadWrap.hidden = true;
+
+function updateSummaryBtnLabel() {
+  summaryBtn.textContent = OUTPUT_LABELS[outputTypeSelect.value] || "Télécharger le document (TXT)";
+}
+outputTypeSelect.addEventListener("change", updateSummaryBtnLabel);
+updateSummaryBtnLabel();
 
 // ====== État local ======
 let pollTimer = null;
@@ -222,6 +238,9 @@ async function pollStatus() {
     // Assurer l'affichage correct des boutons selon l'état et le mode
     downloadWrap.hidden = job.status !== "done";
     summaryBtn.style.display = job.use_api ? "inline-flex" : "none";
+    if (job.use_api) {
+      summaryBtn.textContent = OUTPUT_LABELS[job.output_type] || "Télécharger le document (TXT)";
+    }
 
     if (Array.isArray(job.logs)) {
       const slice = job.logs.slice(lastLogLength).join("\n");
@@ -304,6 +323,7 @@ form.addEventListener("submit", async (e) => {
   const fd = new FormData();
   const use_api = modeSelect.value === "api";
   summaryBtn.style.display = use_api ? "inline-flex" : "none";
+  if (use_api) updateSummaryBtnLabel();
   fd.append("use_api", use_api ? "1" : "0");
   fd.append("api_key", (apiKeyInput.value || "").trim());
   fd.append("model_label", modelSelect.value);

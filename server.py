@@ -106,16 +106,74 @@ DEFAULT_MODEL_LOCAL = "Large v3 Turbo (recommandé)"
 # — prompts selon le format de sortie désiré
 OUTPUT_PROMPTS: Dict[str, str] = {
     "resume": (
-        "Résume le texte suivant en français, sans phrase d'introduction ni conclusion:\n{texte}"
+        "À partir de cette transcription, rédige un résumé concis qui mette en avant uniquement :\n"
+        "- les points clés évoqués,\n"
+        "- les décisions majeures,\n"
+        "- les éléments stratégiques ou critiques à retenir.\n"
+        "Exclue tout détail opérationnel ou annexe. Présente le texte sous forme de liste à puces claire et synthétique.\n\n"
+        "{texte}"
     ),
     "compte_rendu": (
-        "Rédige un compte-rendu en français du texte suivant, sans phrase d'introduction ni conclusion:\n{texte}"
+        "À partir de cette transcription, rédige un compte rendu structuré comprenant :\n"
+        "- Contexte de la réunion (objet, date, participants),\n"
+        "- Points abordés (classés par thème),\n"
+        "- Décisions prises,\n"
+        "- Actions à réaliser avec les responsables et échéances associées.\n"
+        "La rédaction doit être claire, factuelle et sans interprétation.\n\n"
+        "{texte}"
+    ),
+    "note_de_cadrage": (
+        "À partir de cette transcription, rédige une note de cadrage de projet structurée avec les sections suivantes :\n"
+        "- Contexte : rappel de la situation et du besoin,\n"
+        "- Objectifs : finalités attendues,\n"
+        "- Périmètre : inclusions et exclusions,\n"
+        "- Enjeux : valeur ajoutée et impacts,\n"
+        "- Livrables attendus,\n"
+        "- Planning prévisionnel (jalons clés),\n"
+        "- Acteurs et rôles (sponsors, responsables, contributeurs),\n"
+        "- Risques identifiés et contraintes.\n"
+        "La note doit être rédigée de manière synthétique et opérationnelle.\n\n"
+        "{texte}"
     ),
     "cahier_des_charges": (
-        "À partir du texte suivant, rédige un cahier des charges en français, sans phrase d'introduction ni conclusion:\n{texte}"
+        "À partir de cette transcription, rédige un cahier des charges comprenant :\n"
+        "- Contexte et objectifs,\n"
+        "- Besoins fonctionnels (détaillés par grandes fonctionnalités attendues),\n"
+        "- Besoins techniques (infrastructure, compatibilités, performances),\n"
+        "- Contraintes (budgétaires, réglementaires, organisationnelles),\n"
+        "- Critères de validation et d’acceptation.\n"
+        "Le document doit être clair, structuré par rubriques numérotées, et utilisable comme base contractuelle.\n\n"
+        "{texte}"
     ),
-    "notes_de_cadrage": (
-        "À partir du texte suivant, rédige des notes de cadrage en français, sans phrase d'introduction ni conclusion:\n{texte}"
+    "procedure_technique": (
+        "À partir de cette transcription, rédige une procédure technique comprenant :\n"
+        "- Objectif de la procédure,\n"
+        "- Prérequis et conditions initiales,\n"
+        "- Étapes détaillées numérotées,\n"
+        "- Points de contrôle et vérifications à effectuer,\n"
+        "- Erreurs fréquentes et solutions associées.\n"
+        "La rédaction doit être claire, pas-à-pas et utilisable directement par un consultant technique.\n\n"
+        "{texte}"
+    ),
+    "rapport_analyse": (
+        "À partir de cette transcription, rédige un rapport d’analyse comprenant :\n"
+        "- Contexte et problématique,\n"
+        "- Analyse détaillée des points discutés,\n"
+        "- Scénarios ou options identifiées (avantages / inconvénients),\n"
+        "- Recommandations formulées,\n"
+        "- Conclusion et perspectives.\n"
+        "La rédaction doit être factuelle, hiérarchisée et adaptée à une prise de décision.\n\n"
+        "{texte}"
+    ),
+    "support_formation": (
+        "À partir de cette transcription, rédige un support de formation clair et pédagogique comprenant :\n"
+        "- Objectifs pédagogiques,\n"
+        "- Notions clés expliquées simplement,\n"
+        "- Exemples concrets d’application,\n"
+        "- Bonnes pratiques et erreurs à éviter,\n"
+        "- Résumé final.\n"
+        "Le ton doit être didactique et structuré, avec des titres et sous-titres clairs.\n\n"
+        "{texte}"
     ),
 }
 
