@@ -290,7 +290,7 @@ body.transcribing::before {
 }
 
 @keyframes bg-pulse {
-  0%, 50% {
+  0%, 100% {
     filter: brightness(1);
   }
   25% {
