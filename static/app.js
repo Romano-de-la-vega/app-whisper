@@ -211,10 +211,16 @@ async function downloadTxt(jobId, kind = 'transcription', merge = true) {
   try {
     const res = await fetch(`/api/download-txt/${jobId}?merge=${merge ? 1 : 0}&kind=${kind}`, { method: 'GET', cache: 'no-store' });
     if (!res.ok) { alert(`Échec TXT (${res.status}).`); return; }
+    const disposition = res.headers.get('Content-Disposition');
+    let filename = `transcriptions_${jobId}.txt`;
+    if (disposition) {
+      const match = /filename="?([^";]+)"?/i.exec(disposition);
+      if (match && match[1]) filename = match[1];
+    }
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
+    a.href = url; a.download = filename;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   } catch (e) { alert('Échec du téléchargement TXT : ' + e); }
