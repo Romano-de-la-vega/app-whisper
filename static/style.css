@@ -11,6 +11,9 @@
   --accent-hover: linear-gradient(#0B1C48, #009688);
   --accent-2: #009688;
   --input-bg: rgba(255, 255, 255, 0.9);
+  /* Softer pulse for light theme: less darkening, subtle brightening */
+  --pulse-min: 0.96;
+  --pulse-max: 1.08;
 }
 
 :root[data-theme="dark"] {
@@ -26,6 +29,9 @@
   --accent-hover: #00796B;
   --accent-2: #00796B;
   --input-bg: rgba(18, 24, 38, 0.8);
+  /* Keep a stronger pulse in dark theme */
+  --pulse-min: 0.85;
+  --pulse-max: 1.15;
 }
 
 * { box-sizing: border-box; }
@@ -294,10 +300,10 @@ body.transcribing::before {
     filter: brightness(1);
   }
   25% {
-    filter: brightness(1.3);
+    filter: brightness(var(--pulse-max, 1.3));
   }
   75% {
-    filter: brightness(0.7);
+    filter: brightness(var(--pulse-min, 0.7));
   }
 }
 
