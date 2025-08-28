@@ -20,6 +20,7 @@ const filesList = document.getElementById("files-list");
 const logsPre = document.getElementById("logs");
 const downloadWrap = document.getElementById("downloads");
 const summaryBtn = document.getElementById("btn-summary");
+const estimateNode = document.getElementById("estimate");
 
 const themeBtn = document.getElementById("toggle-theme");
 const logoImg = document.getElementById("logo");
@@ -33,6 +34,7 @@ let pollTimer = null;
 let currentJobId = null;
 let lastLogLength = 0;
 let isRunning = false;
+let totalDurationMin = 0;
 
 function setTranscribing(active) {
   bodyEl.classList.toggle('transcribing', !!active);
@@ -91,6 +93,63 @@ function fillLangOptions() {
     if (l === window.DEFAULT_LANG) opt.selected = true;
     langSelect.appendChild(opt);
   });
+}
+
+// ====== Estimation ======
+const LOCAL_RATES = {
+  "Base": 0.33,
+  "Small": 0.88,
+  "Medium": 2.4,
+  "Large v3 (CPU lourd)": 4.9,
+  "Large v3 Turbo (recommandé)": 1.75
+};
+const API_RATES = {
+  "whisper-1": 0.006,
+  "gpt-4o-transcribe": 0.006,
+  "gpt-4o-mini-transcribe": 0.003
+};
+
+async function computeTotalDuration() {
+  const files = Array.from(filesInput.files || []);
+  if (!files.length) {
+    totalDurationMin = 0;
+    updateEstimate();
+    return;
+  }
+  const durations = await Promise.all(files.map(getAudioDuration));
+  totalDurationMin = durations.reduce((a, b) => a + b, 0) / 60;
+  updateEstimate();
+}
+
+function getAudioDuration(file) {
+  return new Promise(resolve => {
+    const url = URL.createObjectURL(file);
+    const audio = document.createElement("audio");
+    audio.preload = "metadata";
+    audio.onloadedmetadata = () => {
+      URL.revokeObjectURL(url);
+      resolve(audio.duration || 0);
+    };
+    audio.onerror = () => resolve(0);
+    audio.src = url;
+  });
+}
+
+function updateEstimate() {
+  if (!estimateNode) return;
+  let text = "";
+  if (totalDurationMin > 0) {
+    const mode = modeSelect.value;
+    const model = modelSelect.value;
+    if (mode === "local" && LOCAL_RATES[model]) {
+      const est = (totalDurationMin * LOCAL_RATES[model]).toFixed(2);
+      text = `Estimation temps : ${est} min`;
+    } else if (mode === "api" && API_RATES[model]) {
+      const est = (totalDurationMin * API_RATES[model]).toFixed(2);
+      text = `Coût estimé : ${est} €`;
+    }
+  }
+  estimateNode.textContent = text;
 }
 
 // ====== Rendu ======
@@ -296,6 +355,8 @@ resetBtn.addEventListener("click", () => {
   // Remettre les options par défaut
   fillModelOptions();
   fillLangOptions();
+  estimateNode.textContent = "";
+  totalDurationMin = 0;
 
   // Remettre le bouton principal
   startBtn.disabled = false;
@@ -304,6 +365,10 @@ resetBtn.addEventListener("click", () => {
 });
 
 // ====== Init ======
-modeSelect.addEventListener("change", fillModelOptions);
+modeSelect.addEventListener("change", () => { fillModelOptions(); updateEstimate(); });
+modelSelect.addEventListener("change", updateEstimate);
+filesInput.addEventListener("change", computeTotalDuration);
+
 fillModelOptions();
 fillLangOptions();
+updateEstimate();
