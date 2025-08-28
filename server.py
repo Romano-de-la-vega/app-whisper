@@ -434,7 +434,9 @@ def _run_local(job_id: str):
     _ensure_local_model_with_progress(job_id, model_name)
 
     # 2) Transcription
-    model = WhisperModel(model_name, device="cpu", compute_type="int8", download_root=str(MODELS_DIR))
+    #   Utiliser le chemin local du modèle pour supporter les noms non standards
+    model_path = str(MODELS_DIR / model_name)
+    model = WhisperModel(model_path, device="cpu", compute_type="int8")
     total = len(job["files"])
     append_log(job_id, "VAD: Silero · beam_size=5")
 
@@ -485,7 +487,8 @@ def _ensure_local_model_with_progress(job_id: str, model_name: str):
     """Télécharge le modèle dans ./models si absent, en affichant la progression dans les logs."""
     # Si l’utilisateur a déjà le dossier du modèle, on ne fait rien
     target_dir = MODELS_DIR / model_name
-    if target_dir.exists() and any(target_dir.rglob("*")):
+    # On considère le modèle présent uniquement si le fichier principal est téléchargé
+    if (target_dir / "model.bin").exists():
         append_log(job_id, f"Modèle '{model_name}' déjà présent.")
         return
 
