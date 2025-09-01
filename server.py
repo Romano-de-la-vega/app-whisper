@@ -272,9 +272,9 @@ async def transcribe_endpoint(
     lang_code = LANGS[lang_label]
 
     if use_api_bool:
-        if not output_type:
-            output_type = "resume"
-        if output_type not in OUTPUT_PROMPTS:
+        if not output_type or output_type == "transcription":
+            output_type = "transcription"
+        elif output_type not in OUTPUT_PROMPTS:
             raise HTTPException(status_code=400, detail="Format de sortie inconnu")
     else:
         output_type = None
@@ -349,6 +349,8 @@ def download_txt(job_id: str, kind: str = "transcription", merge: bool = True):
     with JOBS_LOCK:
         job = JOBS.get(job_id)
     output_type = job.get("output_type") if job else None
+    if output_type == "transcription":
+        output_type = None
 
     if kind == "summary":
         if not output_type:
@@ -431,7 +433,7 @@ def _run_cloud(job_id: str, client: "OpenAI"):
     total = len(job["files"])
     model_name = job["model"]
     lang = job["lang"]
-    output_type = job.get("output_type", "resume")
+    output_type = job.get("output_type", "transcription")
 
     for idx, fmeta in enumerate(job["files"]):
         update_file_status(job_id, idx, "running")
@@ -463,7 +465,7 @@ def _run_cloud(job_id: str, client: "OpenAI"):
             )
 
             out_file = trans_file
-            if output_type and processed:
+            if output_type in OUTPUT_PROMPTS and processed:
                 out_file = out_dir / f"{stem}_{output_type}.txt"
                 out_file.write_text(
                     processed + ("\n" if processed and not processed.endswith("\n") else ""),
