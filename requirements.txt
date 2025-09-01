@@ -10,3 +10,4 @@ httpx<0.27
 huggingface_hub>=0.20.3
 tqdm>=4.66
 pyinstaller==6.15.0
+setuptools<81
