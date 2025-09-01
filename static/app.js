@@ -1,3 +1,5 @@
+import { startWaveform, stopWaveform } from "./waveform.js";
+
 // ====== Sélecteurs DOM ======
 const form = document.getElementById("form");
 const modeSelect = document.getElementById("mode");
@@ -54,6 +56,8 @@ let totalDurationMin = 0;
 
 function setTranscribing(active) {
   bodyEl.classList.toggle('transcribing', !!active);
+  if (active) startWaveform();
+  else stopWaveform();
 }
 
 // ====== Config serveur ======
