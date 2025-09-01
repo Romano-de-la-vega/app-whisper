@@ -52,8 +52,21 @@ let lastLogLength = 0;
 let isRunning = false;
 let totalDurationMin = 0;
 
+let particlesPromise = null;
+function loadParticles() {
+  if (!particlesPromise) {
+    particlesPromise = import("./particles.js").then(() => window.Particles);
+  }
+  return particlesPromise;
+}
+
 function setTranscribing(active) {
   bodyEl.classList.toggle('transcribing', !!active);
+  loadParticles().then(p => {
+    if (!p) return;
+    if (active) p.start();
+    else p.stop();
+  });
 }
 
 // ====== Config serveur ======
