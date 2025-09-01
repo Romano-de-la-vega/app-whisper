@@ -46,6 +46,21 @@ body {
   position: relative;
 }
 
+#bg-particles {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .3s ease;
+}
+
+body.transcribing #bg-particles {
+  opacity: 0.5;
+}
+
 .container {
   width: 100%;
   max-width: 980px;
@@ -281,7 +296,7 @@ body.transcribing::before {
   background: var(--bg-radial), var(--bg-linear);
   animation: bg-rotate 6s linear infinite, bg-pulse 6s ease-in-out infinite;
   transform-origin: center;
-  z-index: -1;
+  z-index: -2;
   pointer-events: none;
   filter: brightness(1);
 }
