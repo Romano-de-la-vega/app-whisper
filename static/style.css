@@ -271,39 +271,62 @@ footer.muted {
   outline-offset: 2px;
 }
 
+@property --grad1 {
+  syntax: '<color>';
+  inherits: false;
+  initial-value: #009688;
+}
+
+@property --grad1 {
+  syntax: '<color>';
+  inherits: false;
+  initial-value: #ff0000;
+}
+
+@property --grad2 {
+  syntax: '<color>';
+  inherits: false;
+  initial-value: #00ff00;
+}
+
+@property --grad3 {
+  syntax: '<color>';
+  inherits: false;
+  initial-value: #0000ff;
+}
+
 body.transcribing::before {
+  --grad1: #ff0000;
+  --grad2: #00ff00;
+  --grad3: #0000ff;
   content: "";
   position: fixed;
   top: -150vh;
   left: -150vw;
   width: 400vw;
   height: 400vh;
-  background: var(--bg-radial), var(--bg-linear);
-  animation: bg-rotate 6s linear infinite, bg-pulse 6s ease-in-out infinite;
-  transform-origin: center;
+  background: var(--bg-radial),
+    linear-gradient(120deg, var(--grad1) 0%, var(--grad2) 50%, var(--grad3) 100%);
+  animation: gradient-shift 8s linear infinite;
   z-index: -1;
   pointer-events: none;
-  filter: brightness(1);
 }
 
-@keyframes bg-rotate {
-  from {
-    transform: rotate(0deg);
+@keyframes gradient-shift {
+  0% {
+    --grad1: #ff0000;
+    --grad2: #00ff00;
+    --grad3: #0000ff;
   }
-  to {
-    transform: rotate(360deg);
+  50% {
+    --grad1: #00ff00;
+    --grad2: #0000ff;
+    --grad3: #ff0000;
   }
-}
-
-@keyframes bg-pulse {
-  0%, 100% {
-    filter: brightness(1);
-  }
-  25% {
-    filter: brightness(var(--pulse-max, 1.3));
-  }
-  75% {
-    filter: brightness(var(--pulse-min, 0.7));
+  100% {
+    --grad1: #ff0000;
+    --grad2: #00ff00;
+    --grad3: #0000ff;
   }
 }
 
