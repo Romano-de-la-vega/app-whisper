@@ -11,6 +11,7 @@
   --accent-hover: linear-gradient(#0B1C48, #009688);
   --accent-2: #009688;
   --input-bg: rgba(255, 255, 255, 0.9);
+  --particles-color: rgba(0, 0, 0, 0.3);
   /* Softer pulse for light theme: less darkening, subtle brightening */
   --pulse-min: 0.96;
   --pulse-max: 1.08;
@@ -29,6 +30,7 @@
   --accent-hover: #00796B;
   --accent-2: #00796B;
   --input-bg: rgba(18, 24, 38, 0.8);
+  --particles-color: rgba(255, 255, 255, 0.7);
   /* Keep a stronger pulse in dark theme */
   --pulse-min: 0.85;
   --pulse-max: 1.15;
@@ -44,6 +46,21 @@ body {
   color: var(--text);
   font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
   position: relative;
+}
+
+#bg-particles {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .3s ease;
+}
+
+body.transcribing #bg-particles {
+  opacity: 0.5;
 }
 
 .container {
@@ -281,7 +298,7 @@ body.transcribing::before {
   background: var(--bg-radial), var(--bg-linear);
   animation: bg-rotate 6s linear infinite, bg-pulse 6s ease-in-out infinite;
   transform-origin: center;
-  z-index: -1;
+  z-index: -2;
   pointer-events: none;
   filter: brightness(1);
 }
