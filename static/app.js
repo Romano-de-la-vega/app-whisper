@@ -9,6 +9,8 @@ const outputTypeSelect = document.getElementById("output_type");
 const modelSelect = document.getElementById("model");
 const langSelect = document.getElementById("lang");
 const filesInput = document.getElementById("files");
+const recordBtn = document.getElementById("record-btn");
+const recordingNote = document.getElementById("recording-note");
 const startBtn = document.getElementById("start");
 const resetBtn = document.getElementById("reset");
 
@@ -57,12 +59,212 @@ let lastLogLength = 0;
 let isRunning = false;
 let totalDurationMin = 0;
 
+let recorder = null;
+let recordedChunks = [];
+let mixStream = null;
+let displayStream = null;
+let micStream = null;
+let audioContext = null;
+let recordingState = "idle";
+let filesFromRecording = false;
+let pendingRecordedFile = null;
+
 let particlesPromise = null;
 function loadParticles() {
   if (!particlesPromise) {
     particlesPromise = import("./particles.js").then(() => window.Particles);
   }
   return particlesPromise;
+}
+
+function supportsRecording() {
+  return (
+    typeof MediaRecorder !== "undefined" &&
+    navigator.mediaDevices &&
+    typeof navigator.mediaDevices.getUserMedia === "function" &&
+    typeof navigator.mediaDevices.getDisplayMedia === "function"
+  );
+}
+
+function updateRecordingNote(text = "", emphasize = false) {
+  if (!recordingNote) return;
+  if (text) {
+    recordingNote.hidden = false;
+    recordingNote.textContent = text;
+    recordingNote.classList.toggle("active", !!emphasize);
+  } else {
+    recordingNote.hidden = true;
+    recordingNote.textContent = "";
+    recordingNote.classList.remove("active");
+  }
+}
+
+function setRecordingState(state) {
+  recordingState = state;
+  if (!recordBtn) return;
+  if (state === "idle") {
+    recordBtn.disabled = false;
+    recordBtn.textContent = "🔴 Enregistrer";
+    recordBtn.classList.remove("recording");
+  } else if (state === "starting") {
+    recordBtn.disabled = true;
+    recordBtn.textContent = "Préparation…";
+    recordBtn.classList.remove("recording");
+  } else if (state === "recording") {
+    recordBtn.disabled = false;
+    recordBtn.textContent = "⏹️ Arrêter";
+    recordBtn.classList.add("recording");
+  } else if (state === "saving") {
+    recordBtn.disabled = true;
+    recordBtn.textContent = "Traitement…";
+    recordBtn.classList.remove("recording");
+  }
+}
+
+function cleanupRecordingResources() {
+  if (mixStream) {
+    try { mixStream.getTracks().forEach(t => t.stop()); } catch (e) { /* noop */ }
+  }
+  if (displayStream) {
+    try { displayStream.getTracks().forEach(t => t.stop()); } catch (e) { /* noop */ }
+  }
+  if (micStream) {
+    try { micStream.getTracks().forEach(t => t.stop()); } catch (e) { /* noop */ }
+  }
+  mixStream = null;
+  displayStream = null;
+  micStream = null;
+  if (audioContext) {
+    audioContext.close().catch(() => {});
+    audioContext = null;
+  }
+  recorder = null;
+}
+
+async function startRecording() {
+  if (!supportsRecording()) {
+    alert("L'enregistrement n'est pas supporté par ce navigateur.");
+    return;
+  }
+
+  try {
+    pendingRecordedFile = null;
+    setRecordingState("starting");
+    updateRecordingNote("Sélectionne l'écran à capturer pour récupérer le son du PC…");
+
+    displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    displayStream.getVideoTracks().forEach(track => { track.enabled = false; });
+
+    const handleExternalStop = () => {
+      if (recordingState === "recording") {
+        stopRecording();
+      }
+    };
+    displayStream.getTracks().forEach(track => {
+      track.addEventListener("ended", handleExternalStop, { once: false });
+    });
+
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true }
+    });
+
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const destination = audioContext.createMediaStreamDestination();
+    let connected = 0;
+
+    const tryConnect = (stream) => {
+      if (!stream) return;
+      const audioTracks = stream.getAudioTracks();
+      if (!audioTracks || !audioTracks.length) return;
+      const onlyAudio = new MediaStream(audioTracks);
+      const source = audioContext.createMediaStreamSource(onlyAudio);
+      source.connect(destination);
+      connected += 1;
+    };
+
+    tryConnect(displayStream);
+    tryConnect(micStream);
+
+    if (!connected) {
+      throw new Error("Aucun flux audio capturé");
+    }
+
+    const preferredMime = "audio/webm;codecs=opus";
+    const options = MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(preferredMime)
+      ? { mimeType: preferredMime }
+      : undefined;
+
+    mixStream = destination.stream;
+    recorder = options ? new MediaRecorder(mixStream, options) : new MediaRecorder(mixStream);
+    recordedChunks = [];
+
+    recorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) {
+        recordedChunks.push(event.data);
+      }
+    };
+
+    recorder.onstop = async () => {
+      const mimeType = recorder && recorder.mimeType ? recorder.mimeType : "audio/webm";
+      const blob = new Blob(recordedChunks, { type: mimeType });
+      cleanupRecordingResources();
+
+      if (!blob.size) {
+        setRecordingState("idle");
+        updateRecordingNote("Enregistrement vide.");
+        return;
+      }
+
+      const filename = `enregistrement_${new Date().toISOString().replace(/[\.:]/g, "-")}.webm`;
+      const file = new File([blob], filename, { type: blob.type || "audio/webm" });
+      pendingRecordedFile = file;
+
+      let dt = null;
+      try {
+        dt = new DataTransfer();
+      } catch (e) {
+        if (typeof ClipboardEvent !== "undefined") {
+          try { dt = new ClipboardEvent("copy").clipboardData || null; } catch (_) { dt = null; }
+        }
+      }
+
+      if (dt && dt.items) {
+        dt.items.add(file);
+        filesInput.files = dt.files;
+        filesFromRecording = true;
+        filesInput.dispatchEvent(new Event("change"));
+      } else {
+        filesFromRecording = true;
+        updateEstimateWithRecordedFile(file).catch(() => {});
+      }
+      updateRecordingNote(`Prêt : ${filename}`);
+      setRecordingState("idle");
+    };
+
+    setRecordingState("recording");
+    updateRecordingNote("Enregistrement en cours…", true);
+    recorder.start();
+  } catch (err) {
+    console.error(err);
+    cleanupRecordingResources();
+    setRecordingState("idle");
+    const message = err && err.message ? err.message : "Impossible de démarrer l'enregistrement.";
+    updateRecordingNote(message);
+  }
+}
+
+function stopRecording() {
+  if (!recorder) return;
+  setRecordingState("saving");
+  updateRecordingNote("Finalisation de l'enregistrement…");
+  try {
+    recorder.stop();
+  } catch (e) {
+    console.error(e);
+    cleanupRecordingResources();
+    setRecordingState("idle");
+    updateRecordingNote("Échec de l'arrêt de l'enregistrement.");
+  }
 }
 
 function setTranscribing(active) {
@@ -184,6 +386,22 @@ function updateEstimate() {
     }
   }
   estimateNode.textContent = text;
+}
+
+function handleFilesChanged() {
+  computeTotalDuration();
+  if (!filesFromRecording) {
+    updateRecordingNote("");
+    pendingRecordedFile = null;
+  }
+  filesFromRecording = false;
+}
+
+async function updateEstimateWithRecordedFile(file) {
+  if (!file) return;
+  const duration = await getAudioDuration(file);
+  totalDurationMin = (duration || 0) / 60;
+  updateEstimate();
 }
 
 // ====== Rendu ======
@@ -325,7 +543,7 @@ form.addEventListener("submit", async (e) => {
   }
 
   // === START ===
-  if (!filesInput.files.length) {
+  if (!filesInput.files.length && !pendingRecordedFile) {
     alert("Ajoute au moins un fichier audio.");
     return;
   }
@@ -353,7 +571,11 @@ form.addEventListener("submit", async (e) => {
   fd.append("model_label", modelSelect.value);
   fd.append("lang_label", langSelect.value);
   if (use_api) fd.append("output_type", outputTypeSelect.value);
-  Array.from(filesInput.files).forEach(f => fd.append("files", f, f.name));
+  const filesToSend = Array.from(filesInput.files);
+  if (!filesToSend.length && pendingRecordedFile) {
+    filesToSend.push(pendingRecordedFile);
+  }
+  filesToSend.forEach(f => fd.append("files", f, f.name));
 
 
   try {
@@ -386,6 +608,14 @@ resetBtn.addEventListener("click", () => {
   isRunning = false;
   setTranscribing(false);
 
+  if (recordingState !== "idle") {
+    cleanupRecordingResources();
+    setRecordingState("idle");
+  }
+  updateRecordingNote("");
+  pendingRecordedFile = null;
+  filesFromRecording = false;
+
   // reset visuel du formulaire
   form.reset();
   statusSection.hidden = true;
@@ -408,10 +638,25 @@ resetBtn.addEventListener("click", () => {
   startBtn.classList.remove("danger");
 });
 
+if (recordBtn) {
+  if (!supportsRecording()) {
+    recordBtn.disabled = true;
+    recordBtn.title = "Enregistrement non supporté sur ce navigateur";
+  } else {
+    recordBtn.addEventListener("click", () => {
+      if (recordingState === "recording") {
+        stopRecording();
+      } else if (recordingState === "idle") {
+        startRecording();
+      }
+    });
+  }
+}
+
 // ====== Init ======
 modeSelect.addEventListener("change", () => { fillModelOptions(); updateEstimate(); updateSummaryBtnLabel(); });
 modelSelect.addEventListener("change", updateEstimate);
-filesInput.addEventListener("change", computeTotalDuration);
+filesInput.addEventListener("change", handleFilesChanged);
 
 fillModelOptions();
 fillLangOptions();
