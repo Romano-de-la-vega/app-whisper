@@ -122,7 +122,7 @@ h1 {
   gap: 16px;
 }
 
-.field {
+.field { 
   grid-column: span 6;
   display: flex;
   flex-direction: column;
@@ -130,6 +130,13 @@ h1 {
 }
 
 .field.full { grid-column: 1 / -1; }
+
+.field-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
 
 label {
   color: var(--muted);
@@ -189,6 +196,37 @@ button.danger {
   background: #e33c3c;
   color: #fff;
   border-color: #b92d2d;
+}
+
+.record-btn {
+  padding: 6px 10px;
+  font-size: 13px;
+  gap: 6px;
+  background: #c91532;
+  border-color: #9b1128;
+  color: #fff;
+  box-shadow: 0 0 0 0 rgba(201, 21, 50, 0.4);
+  transition: box-shadow .3s ease, background .2s ease;
+}
+
+.record-btn:hover {
+  background: #e11d3f;
+}
+
+.record-btn[data-state="preparing"],
+.record-btn[data-state="recording"] {
+  background: #ff2d55;
+  border-color: #d11439;
+}
+
+.record-btn[data-state="recording"] {
+  animation: pulse-record 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse-record {
+  0% { box-shadow: 0 0 0 0 rgba(255, 45, 85, 0.45); }
+  70% { box-shadow: 0 0 0 12px rgba(255, 45, 85, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 45, 85, 0); }
 }
 
 .status { margin-top: 18px; }
