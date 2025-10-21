@@ -136,6 +136,47 @@ label {
   font-size: 14px;
 }
 
+.label-with-record {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.record-btn {
+  background: #c62828;
+  color: #fff;
+  font-size: 13px;
+  padding: 6px 12px;
+  gap: 6px;
+}
+
+.record-btn .dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
+}
+
+.record-btn.recording {
+  background: #8e0000;
+}
+
+.record-btn.recording .dot {
+  animation: pulse-dot 1s infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+
+#recording-status {
+  color: var(--muted);
+}
+
 select,
 input[type="file"],
 input[type="password"] {
