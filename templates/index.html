@@ -68,9 +68,13 @@
         </div>
 
         <div class="field full">
-          <label for="files">Fichiers audio</label>
+          <label for="files" class="label-row">
+            <span>Fichiers audio</span>
+            <button id="record-btn" type="button" class="record-btn" title="Enregistrer depuis le micro et le PC">🔴 Enregistrer</button>
+          </label>
           <input id="files" name="files" type="file" multiple accept=".mp3,.wav,.m4a,.flac" />
           <small>Formats : mp3, wav, m4a, flac</small>
+          <small id="recording-note" class="recording-note" hidden></small>
           <small id="estimate"></small>
         </div>
 

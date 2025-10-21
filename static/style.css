@@ -136,6 +136,45 @@ label {
   font-size: 14px;
 }
 
+.label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.record-btn {
+  background: #d02534;
+  border-color: #aa1d2a;
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.1;
+  padding: 6px 12px;
+  gap: 6px;
+}
+
+.record-btn:hover {
+  background: #b11f2b;
+}
+
+.record-btn.recording {
+  background: #8b0c16;
+  border-color: #6f0912;
+}
+
+.recording-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.recording-note.active {
+  color: #d02534;
+  font-weight: 600;
+}
+
 select,
 input[type="file"],
 input[type="password"] {
