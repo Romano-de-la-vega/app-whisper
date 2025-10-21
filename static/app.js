@@ -11,6 +11,9 @@ const langSelect = document.getElementById("lang");
 const filesInput = document.getElementById("files");
 const startBtn = document.getElementById("start");
 const resetBtn = document.getElementById("reset");
+const recordBtn = document.getElementById("record-btn");
+const recordBtnLabel = recordBtn ? recordBtn.querySelector(".label") : null;
+const recordingStatus = document.getElementById("recording-status");
 
 const statusSection = document.getElementById("status");
 const progressBar = document.getElementById("progress");
@@ -56,6 +59,13 @@ let currentJobId = null;
 let lastLogLength = 0;
 let isRunning = false;
 let totalDurationMin = 0;
+let isRecording = false;
+let mediaRecorder = null;
+let recordingChunks = [];
+let recordingStreams = [];
+let recordingAudioContext = null;
+let recordedFile = null;
+let suppressManualReset = false;
 
 let particlesPromise = null;
 function loadParticles() {
@@ -63,6 +73,168 @@ function loadParticles() {
     particlesPromise = import("./particles.js").then(() => window.Particles);
   }
   return particlesPromise;
+}
+
+function setRecordingStatus(text, isError = false) {
+  if (!recordingStatus) return;
+  recordingStatus.textContent = text;
+  recordingStatus.style.color = isError ? "#c62828" : "var(--muted)";
+}
+
+function setRecordButtonState(state) {
+  if (!recordBtn) return;
+  if (state === "recording") {
+    recordBtn.classList.add("recording");
+    recordBtn.setAttribute("aria-pressed", "true");
+    if (recordBtnLabel) recordBtnLabel.textContent = "Arrêter";
+  } else {
+    recordBtn.classList.remove("recording");
+    recordBtn.removeAttribute("aria-pressed");
+    if (recordBtnLabel) recordBtnLabel.textContent = "Enregistrer";
+  }
+}
+
+function cleanupRecordingResources() {
+  recordingStreams.forEach((stream) => {
+    stream.getTracks().forEach((track) => track.stop());
+  });
+  recordingStreams = [];
+  if (recordingAudioContext) {
+    recordingAudioContext.close().catch(() => {});
+    recordingAudioContext = null;
+  }
+}
+
+function finalizeRecording() {
+  cleanupRecordingResources();
+  isRecording = false;
+  const mimeType = mediaRecorder && mediaRecorder.mimeType ? mediaRecorder.mimeType : "audio/webm";
+  mediaRecorder = null;
+  if (!recordingChunks.length) {
+    setRecordingStatus("Aucun son capturé.", true);
+    recordBtn && (recordBtn.disabled = false);
+    setRecordButtonState("idle");
+    return;
+  }
+
+  const blob = new Blob(recordingChunks, { type: mimeType });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  recordedFile = new File([blob], `enregistrement-${timestamp}.webm`, { type: mimeType });
+
+  if (recordBtn) recordBtn.disabled = false;
+  setRecordButtonState("idle");
+  setRecordingStatus(`Enregistrement prêt : ${recordedFile.name}`);
+
+  try {
+    const transfer = new DataTransfer();
+    transfer.items.add(recordedFile);
+    suppressManualReset = true;
+    filesInput.files = transfer.files;
+    filesInput.dispatchEvent(new Event("change", { bubbles: true }));
+  } catch (err) {
+    console.error("Impossible d'attacher l'enregistrement", err);
+    setRecordingStatus("Enregistrement prêt, ajoute-le manuellement (export impossible).", true);
+  }
+
+  recordingChunks = [];
+}
+
+async function startRecording() {
+  if (!recordBtn) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !navigator.mediaDevices.getDisplayMedia) {
+    alert("L'enregistrement audio n'est pas supporté par ce navigateur.");
+    return;
+  }
+
+  try {
+    recordBtn.disabled = true;
+    setRecordingStatus("Préparation de l'enregistrement…");
+    recordedFile = null;
+
+    const systemStream = await navigator.mediaDevices.getDisplayMedia({
+      audio: { echoCancellation: false, noiseSuppression: false },
+      video: true,
+    });
+    const systemAudioTracks = systemStream.getAudioTracks();
+    if (!systemAudioTracks.length) {
+      systemStream.getTracks().forEach((track) => track.stop());
+      throw new Error("Le son du système n'est pas disponible.");
+    }
+
+    const micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true },
+      video: false,
+    });
+
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    recordingAudioContext = audioContext;
+    const destination = audioContext.createMediaStreamDestination();
+
+    const systemAudioStream = new MediaStream(systemAudioTracks);
+    const micAudioStream = new MediaStream(micStream.getAudioTracks());
+
+    const systemSource = audioContext.createMediaStreamSource(systemAudioStream);
+    systemSource.connect(destination);
+    const micSource = audioContext.createMediaStreamSource(micAudioStream);
+    micSource.connect(destination);
+
+    recordingStreams = [systemStream, micStream];
+    recordingChunks = [];
+    const preferredType = "audio/webm;codecs=opus";
+    const recorderOptions = {};
+    if (window.MediaRecorder && typeof MediaRecorder.isTypeSupported === "function" && MediaRecorder.isTypeSupported(preferredType)) {
+      recorderOptions.mimeType = preferredType;
+    }
+    mediaRecorder = new MediaRecorder(destination.stream, recorderOptions);
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) recordingChunks.push(event.data);
+    };
+    mediaRecorder.onstop = finalizeRecording;
+    mediaRecorder.start();
+
+    // Désactive la piste vidéo pour éviter un carré noir lors du partage.
+    systemStream.getVideoTracks().forEach((track) => (track.enabled = false));
+
+    [...systemStream.getTracks(), ...micStream.getTracks()].forEach((track) => {
+      track.addEventListener("ended", () => {
+        if (isRecording) stopRecording();
+      }, { once: true });
+    });
+
+    isRecording = true;
+    setRecordButtonState("recording");
+    setRecordingStatus("Enregistrement en cours… Cliquez à nouveau pour arrêter.");
+    recordBtn.disabled = false;
+  } catch (error) {
+    console.error("Échec de l'enregistrement", error);
+    cleanupRecordingResources();
+    if (recordBtn) {
+      recordBtn.disabled = false;
+      setRecordButtonState("idle");
+    }
+    isRecording = false;
+    const message = error && error.message ? error.message : String(error);
+    setRecordingStatus(message, true);
+  }
+}
+
+function stopRecording() {
+  if (!recordBtn) return;
+  if (!mediaRecorder || mediaRecorder.state === "inactive") {
+    setRecordButtonState("idle");
+    recordBtn.disabled = false;
+    return;
+  }
+
+  setRecordingStatus("Finalisation de l'enregistrement…");
+  recordBtn.disabled = true;
+  isRecording = false;
+  try {
+    mediaRecorder.stop();
+  } catch (err) {
+    console.error("Erreur lors de l'arrêt de l'enregistrement", err);
+    finalizeRecording();
+  }
 }
 
 function setTranscribing(active) {
@@ -406,13 +578,48 @@ resetBtn.addEventListener("click", () => {
   startBtn.disabled = false;
   startBtn.textContent = "Lancer la transcription";
   startBtn.classList.remove("danger");
+
+  recordedFile = null;
+  recordingChunks = [];
+  suppressManualReset = false;
+  if (isRecording && mediaRecorder) {
+    try {
+      mediaRecorder.onstop = null;
+      mediaRecorder.stop();
+    } catch (err) {
+      console.debug("Arrêt manuel de l'enregistrement", err);
+    }
+  }
+  cleanupRecordingResources();
+  mediaRecorder = null;
+  isRecording = false;
+  setRecordButtonState("idle");
+  setRecordingStatus("");
+  if (recordBtn) recordBtn.disabled = false;
 });
 
 // ====== Init ======
 modeSelect.addEventListener("change", () => { fillModelOptions(); updateEstimate(); updateSummaryBtnLabel(); });
 modelSelect.addEventListener("change", updateEstimate);
-filesInput.addEventListener("change", computeTotalDuration);
+filesInput.addEventListener("change", () => {
+  if (suppressManualReset) {
+    suppressManualReset = false;
+  } else {
+    recordedFile = null;
+    if (!isRecording) setRecordButtonState("idle");
+    setRecordingStatus("");
+  }
+  computeTotalDuration();
+});
+
+if (recordBtn) {
+  recordBtn.addEventListener("click", () => {
+    if (isRecording) stopRecording();
+    else startRecording();
+  });
+}
 
 fillModelOptions();
 fillLangOptions();
 updateEstimate();
+setRecordingStatus("");
