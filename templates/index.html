@@ -68,7 +68,10 @@
         </div>
 
         <div class="field full">
-          <label for="files">Fichiers audio</label>
+          <div class="field-label">
+            <label for="files">Fichiers audio</label>
+            <button type="button" id="record-btn" class="record-btn" title="Enregistrer">⏺️ Enregistrer</button>
+          </div>
           <input id="files" name="files" type="file" multiple accept=".mp3,.wav,.m4a,.flac" />
           <small>Formats : mp3, wav, m4a, flac</small>
           <small id="estimate"></small>
