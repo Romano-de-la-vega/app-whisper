@@ -5,8 +5,9 @@ import uuid
 import pathlib
 import threading
 import time
+import wave
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable, Tuple
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
@@ -22,6 +23,13 @@ try:
     from openai import OpenAI  # lib openai >= 1.x
 except Exception:
     OpenAI = None  # type: ignore
+
+try:
+    import av  # type: ignore
+    from av.audio.resampler import AudioResampler  # type: ignore
+except Exception:
+    av = None  # type: ignore
+    AudioResampler = None  # type: ignore
 
 # ----- Téléchargement Hugging Face (pour montrer la progression)
 try:
@@ -176,6 +184,147 @@ OUTPUT_PROMPTS: Dict[str, str] = {
         "{texte}"
     ),
 }
+
+MAX_OPENAI_SEGMENT_SECONDS = 20 * 60  # 20 minutes
+
+
+def _get_audio_duration_seconds(path: Path) -> float:
+    if av is None:
+        return 0.0
+    try:
+        with av.open(str(path)) as container:
+            if container.duration:
+                try:
+                    return float(container.duration * av.time_base)
+                except Exception:
+                    pass
+            for stream in container.streams:
+                if stream.type == "audio" and stream.duration and stream.time_base:
+                    try:
+                        return float(stream.duration * stream.time_base)
+                    except Exception:
+                        continue
+    except Exception as exc:
+        logging.warning("Durée audio inconnue pour %s : %s", path, exc)
+    return 0.0
+
+
+def _split_audio_with_av(src: Path, out_dir: Path, max_duration_sec: int) -> List[Path]:
+    if av is None or AudioResampler is None:
+        raise RuntimeError("Le module 'av' est requis pour découper l'audio en segments.")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    segments: List[Path] = []
+
+    with av.open(str(src)) as container:
+        audio_stream = next((s for s in container.streams if s.type == "audio"), None)
+        if audio_stream is None:
+            raise RuntimeError("Aucune piste audio détectée pour le découpage.")
+
+        sample_rate = int(audio_stream.rate or 16000)
+        resampler = AudioResampler(format="s16", layout="mono", rate=sample_rate)
+        chunk_samples_limit = int(max_duration_sec * sample_rate)
+        if chunk_samples_limit <= 0:
+            raise RuntimeError("Durée de segment invalide pour le découpage audio.")
+
+        bytes_per_sample = 2  # s16 mono
+        chunk_index = 0
+        chunk_buffer = bytearray()
+        chunk_samples = 0
+
+        def flush_chunk():
+            nonlocal chunk_buffer, chunk_samples, chunk_index
+            if not chunk_buffer:
+                return
+            out_path = out_dir / f"{src.stem}_part{chunk_index:02d}.wav"
+            with wave.open(str(out_path), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(bytes_per_sample)
+                wf.setframerate(sample_rate)
+                wf.writeframes(chunk_buffer)
+            segments.append(out_path)
+            chunk_index += 1
+            chunk_buffer = bytearray()
+            chunk_samples = 0
+
+        def consume_resampled_frame(rframe):
+            nonlocal chunk_buffer, chunk_samples
+            data = b"".join(plane.to_bytes() for plane in rframe.planes)
+            offset = 0
+            total = len(data)
+            while offset < total:
+                remaining_samples = chunk_samples_limit - chunk_samples
+                if remaining_samples <= 0:
+                    flush_chunk()
+                    continue
+                remaining_bytes = remaining_samples * bytes_per_sample
+                take = min(remaining_bytes, total - offset)
+                if take <= 0:
+                    break
+                chunk_buffer.extend(data[offset:offset + take])
+                chunk_samples += take // bytes_per_sample
+                offset += take
+                if chunk_samples >= chunk_samples_limit:
+                    flush_chunk()
+
+        for frame in container.decode(audio=0):
+            resampled = resampler.resample(frame)
+            if resampled is None:
+                continue
+            frames = resampled if isinstance(resampled, (list, tuple)) else [resampled]
+            for rframe in frames:
+                consume_resampled_frame(rframe)
+
+        # Flush resampler
+        leftover = resampler.flush()
+        if leftover:
+            frames = leftover if isinstance(leftover, (list, tuple)) else [leftover]
+            for rframe in frames:
+                consume_resampled_frame(rframe)
+
+        flush_chunk()
+
+    if not segments:
+        raise RuntimeError("Découpage audio : aucun segment généré.")
+
+    return segments
+
+
+def _prepare_api_audio_segments(job_id: str, src: Path) -> Tuple[List[Path], Callable[[], None], float]:
+    cleanup: Callable[[], None] = lambda: None
+    duration_sec = _get_audio_duration_seconds(src)
+
+    if duration_sec > 0:
+        append_log(job_id, f"Durée détectée : {duration_sec / 60:.1f} min")
+
+    if duration_sec <= 0 or duration_sec <= MAX_OPENAI_SEGMENT_SECONDS:
+        return [src], cleanup, duration_sec
+
+    append_log(job_id, "Durée supérieure à 20 minutes → découpage en segments de 20 minutes maximum…")
+
+    chunks_root = TEMP_DIR / job_id / "chunks"
+    chunks_dir = chunks_root / src.stem
+    if chunks_dir.exists():
+        shutil.rmtree(chunks_dir)
+
+    try:
+        segments = _split_audio_with_av(src, chunks_dir, MAX_OPENAI_SEGMENT_SECONDS)
+    except Exception as exc:
+        append_log(job_id, f"[WARN] Découpage audio impossible : {exc}")
+        shutil.rmtree(chunks_dir, ignore_errors=True)
+        return [src], cleanup, duration_sec
+
+    if not segments:
+        append_log(job_id, "[WARN] Aucun segment généré, envoi du fichier complet.")
+        shutil.rmtree(chunks_dir, ignore_errors=True)
+        return [src], cleanup, duration_sec
+
+    append_log(job_id, f"→ {len(segments)} segment(s) créé(s) pour l'appel API.")
+
+    def _cleanup():
+        shutil.rmtree(chunks_dir, ignore_errors=True)
+
+    return segments, _cleanup, duration_sec
 
 # — tailles approximatives pour le suivi de progression (octets)
 #   valeurs proches des poids CTranslate2 (pratique pour une jauge réaliste)
@@ -438,14 +587,38 @@ def _run_cloud(job_id: str, client: "OpenAI"):
     for idx, fmeta in enumerate(job["files"]):
         update_file_status(job_id, idx, "running")
         append_log(job_id, f"→ Envoi à OpenAI : {fmeta['name']}")
+        segments: List[Path] = [Path(fmeta["path"])]
+        cleanup = lambda: None
         try:
-            with open(fmeta["path"], "rb") as fh:
-                resp = client.audio.transcriptions.create(
-                    model=model_name,
-                    file=fh,
-                    language=lang,
-                )
-            text = (getattr(resp, "text", "") or "").strip()
+            segments, cleanup, duration_sec = _prepare_api_audio_segments(job_id, Path(fmeta["path"]))
+            chunk_texts: List[str] = []
+            chunk_count = len(segments)
+
+            for chunk_idx, seg_path in enumerate(segments, 1):
+                if chunk_count > 1:
+                    append_log(job_id, f"  Segment {chunk_idx}/{chunk_count} → {seg_path.name}")
+                with open(seg_path, "rb") as fh:
+                    resp = client.audio.transcriptions.create(
+                        model=model_name,
+                        file=fh,
+                        language=lang,
+                    )
+                seg_text = (getattr(resp, "text", "") or "").strip()
+                if seg_text:
+                    chunk_texts.append(seg_text)
+
+                progress = chunk_idx / max(chunk_count, 1)
+                set_file_progress(job_id, idx, progress)
+                set_job_progress(job_id, (idx + progress) / max(total, 1))
+
+            text = "\n\n".join(chunk_texts).strip()
+
+            if chunk_count > 1:
+                if duration_sec > 0:
+                    minutes = duration_sec / 60
+                    append_log(job_id, f"→ Fusion des segments (≈{minutes:.1f} min au total)")
+                else:
+                    append_log(job_id, "→ Fusion des segments (durée totale inconnue)")
 
             processed = text
             prompt_tmpl = OUTPUT_PROMPTS.get(output_type)
@@ -473,14 +646,16 @@ def _run_cloud(job_id: str, client: "OpenAI"):
                 )
 
             set_file_output(job_id, idx, str(out_file))
-            set_file_progress(job_id, idx, 1.0)                    # <— ajout
-            set_job_progress(job_id, (idx + 1) / max(total, 1))    # <— ajout
+            set_file_progress(job_id, idx, 1.0)
+            set_job_progress(job_id, (idx + 1) / max(total, 1))
             update_file_status(job_id, idx, "done")
             append_log(job_id, f"✓ Terminé (API) : {fmeta['name']} → {out_file.name}")
 
         except Exception as e:
             update_file_status(job_id, idx, "error", error=str(e))
             append_log(job_id, f"[ERREUR API] {fmeta['name']} : {e}")
+        finally:
+            cleanup()
 
         set_job_progress(job_id, (idx + 1) / max(total, 1))
 
