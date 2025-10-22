@@ -13,6 +13,7 @@ const startBtn = document.getElementById("start");
 const resetBtn = document.getElementById("reset");
 const recordBtn = document.getElementById("record-btn");
 const recordingHint = document.getElementById("recording-hint");
+const recordTimer = document.getElementById("record-timer");
 
 const statusSection = document.getElementById("status");
 const progressBar = document.getElementById("progress");
@@ -64,6 +65,8 @@ let recordingChunks = [];
 let recordingStreams = [];
 let lastRecordedFile = null;
 let isRecording = false;
+let recordTimerInterval = null;
+let recordStartTime = 0;
 
 let particlesPromise = null;
 function loadParticles() {
@@ -86,6 +89,45 @@ function setRecordButtonState(active) {
   if (!recordBtn) return;
   recordBtn.classList.toggle("is-recording", !!active);
   recordBtn.innerHTML = `<span class="dot" aria-hidden="true"></span>${active ? "Arrêter" : "Enregistrer"}`;
+}
+
+function resetRecordTimerDisplay() {
+  if (!recordTimer) return;
+  recordTimer.textContent = "00:00:00";
+  recordTimer.classList.remove("is-recording");
+}
+
+function updateRecordTimerDisplay() {
+  if (!recordTimer) return;
+  const elapsed = Math.max(0, Math.floor((Date.now() - recordStartTime) / 1000));
+  const hours = String(Math.floor(elapsed / 3600)).padStart(2, "0");
+  const minutes = String(Math.floor((elapsed % 3600) / 60)).padStart(2, "0");
+  const seconds = String(elapsed % 60).padStart(2, "0");
+  recordTimer.textContent = `${hours}:${minutes}:${seconds}`;
+}
+
+function startRecordTimer() {
+  if (!recordTimer) return;
+  recordStartTime = Date.now();
+  recordTimer.classList.add("is-recording");
+  updateRecordTimerDisplay();
+  if (recordTimerInterval) clearInterval(recordTimerInterval);
+  recordTimerInterval = setInterval(updateRecordTimerDisplay, 500);
+}
+
+function stopRecordTimer(resetDisplay = false) {
+  if (recordTimerInterval) {
+    clearInterval(recordTimerInterval);
+    recordTimerInterval = null;
+  }
+  if (!recordTimer) return;
+  if (!resetDisplay) {
+    updateRecordTimerDisplay();
+  }
+  recordTimer.classList.remove("is-recording");
+  if (resetDisplay) {
+    recordTimer.textContent = "00:00:00";
+  }
 }
 
 function updateRecordingHint(text = "", isError = false) {
@@ -151,12 +193,14 @@ async function startRecording() {
       stopRecordingStreams();
       mediaRecorder = null;
       recordingChunks = [];
+      stopRecordTimer(true);
     };
 
     mediaRecorder.start();
     isRecording = true;
     setRecordButtonState(true);
     updateRecordingHint("Enregistrement en cours… pensez à partager l'onglet avec le son.");
+    startRecordTimer();
   } catch (err) {
     console.error(err);
     updateRecordingHint("Impossible de démarrer : " + (err && err.message ? err.message : err), true);
@@ -165,6 +209,7 @@ async function startRecording() {
     recordingChunks = [];
     isRecording = false;
     setRecordButtonState(false);
+    stopRecordTimer(true);
   } finally {
     recordBtn.disabled = false;
   }
@@ -233,6 +278,7 @@ function finalizeRecording() {
   stopRecordingStreams();
   mediaRecorder = null;
   recordingChunks = [];
+  stopRecordTimer();
 }
 
 // ====== Config serveur ======
@@ -560,6 +606,7 @@ resetBtn.addEventListener("click", () => {
     recordBtn.disabled = false;
   }
   updateRecordingHint("");
+  stopRecordTimer(true);
 
   // reset visuel du formulaire
   form.reset();
@@ -594,6 +641,7 @@ updateEstimate();
 
 if (recordBtn) {
   setRecordButtonState(false);
+  resetRecordTimerDisplay();
   recordBtn.addEventListener("click", () => {
     if (isRecording) {
       stopRecordingAction();

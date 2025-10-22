@@ -138,6 +138,12 @@ h1 {
   gap: 12px;
 }
 
+.record-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .icon-button.record {
   gap: 6px;
   background: transparent;
@@ -169,6 +175,18 @@ h1 {
 .icon-button.record[disabled] {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.record-timer {
+  font-family: "SFMono-Regular", "Roboto Mono", "Menlo", monospace;
+  font-size: 14px;
+  color: var(--muted);
+  min-width: 72px;
+  text-align: right;
+}
+
+.record-timer.is-recording {
+  color: #e33c3c;
 }
 
 label {
