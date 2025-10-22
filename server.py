@@ -1,3 +1,4 @@
+import io
 import os
 import sys
 import shutil
@@ -6,7 +7,8 @@ import pathlib
 import threading
 import time
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
@@ -28,6 +30,13 @@ try:
     from huggingface_hub import snapshot_download
 except Exception:
     snapshot_download = None  # type: ignore
+
+try:
+    import av  # type: ignore
+    from av.audio.resampler import AudioResampler  # type: ignore
+except Exception:
+    av = None  # type: ignore
+    AudioResampler = None  # type: ignore
 
 
 # ========= Base dir compatible PyInstaller =========
@@ -418,6 +427,146 @@ def run_job(job_id: str, api_key: Optional[str]):
         set_job_status(job_id, "error")
         append_log(job_id, f"[ERREUR JOB] {e}")
 
+# ========= Utilitaires audio (API OpenAI) =========
+
+@dataclass
+class AudioChunk:
+    index: int
+    duration: float
+    name: str
+    path: Optional[str] = None
+    data: Optional[bytes] = None
+
+
+def _ensure_av_available() -> None:
+    if av is None or AudioResampler is None:
+        raise RuntimeError("Le découpage audio nécessite la bibliothèque 'av'.")
+
+
+def _format_seconds(seconds: Optional[float]) -> str:
+    if not seconds or seconds <= 0:
+        return "00:00:00"
+    total = max(0, int(round(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _guess_layout(stream: "av.stream.Stream") -> str:  # type: ignore[name-defined]
+    layout = getattr(stream, "layout", None)
+    if layout is not None:
+        name = getattr(layout, "name", None)
+        if name:
+            return name
+    channels = getattr(stream, "channels", 0) or 1
+    return "mono" if channels == 1 else "stereo"
+
+
+class _ChunkWriter:
+    def __init__(self, rate: int, layout: str):
+        self.rate = rate or 16000
+        self.layout = layout or "mono"
+        self.buffer = io.BytesIO()
+        self.container = av.open(self.buffer, mode="w", format="wav")  # type: ignore[arg-type]
+        self.stream = self.container.add_stream("pcm_s16le", rate=self.rate, layout=self.layout)
+        self.duration = 0.0
+
+    def add_frame(self, frame: "av.AudioFrame") -> None:  # type: ignore[name-defined]
+        sample_rate = frame.sample_rate or self.rate
+        frame_duration = (frame.samples or 0) / float(sample_rate or self.rate or 1)
+        for packet in self.stream.encode(frame):
+            self.container.mux(packet)
+        self.duration += frame_duration
+
+    def finish(self) -> Tuple[bytes, float]:
+        for packet in self.stream.encode(None):
+            self.container.mux(packet)
+        self.container.close()
+        data = self.buffer.getvalue()
+        duration = self.duration
+        self.buffer.close()
+        self.container = None
+        self.stream = None
+        self.buffer = None  # type: ignore[assignment]
+        self.duration = 0.0
+        return data, duration
+
+
+def _split_audio_for_openai(path: str, max_seconds: float = 20 * 60) -> List[AudioChunk]:
+    _ensure_av_available()
+    container = av.open(path)  # type: ignore[arg-type]
+    try:
+        audio_stream = next((s for s in container.streams if s.type == "audio"), None)
+        if audio_stream is None:
+            raise RuntimeError("Aucune piste audio détectée dans le fichier.")
+
+        approx_duration = None
+        if audio_stream.duration and audio_stream.time_base:
+            try:
+                approx_duration = float(audio_stream.duration * audio_stream.time_base)
+            except Exception:
+                approx_duration = None
+
+        if approx_duration is not None and approx_duration <= max_seconds + 1e-3:
+            return [
+                AudioChunk(
+                    index=0,
+                    duration=approx_duration,
+                    name=pathlib.Path(path).name,
+                    path=path,
+                )
+            ]
+
+        rate = audio_stream.rate or 16000
+        layout = _guess_layout(audio_stream)
+        resampler = AudioResampler(format="s16", layout=layout, rate=rate)
+
+        chunks: List[AudioChunk] = []
+        chunk_index = 0
+        writer: Optional[_ChunkWriter] = None
+
+        def feed_frames(frames_obj):
+            nonlocal writer, chunk_index
+            if not frames_obj:
+                return
+            frames = frames_obj if isinstance(frames_obj, list) else [frames_obj]
+            for sub in frames:
+                if writer is None:
+                    writer = _ChunkWriter(rate, layout)
+                writer.add_frame(sub)
+                if writer.duration >= max_seconds:
+                    data, duration = writer.finish()
+                    chunk_name = f"{pathlib.Path(path).stem}_part{chunk_index + 1}.wav"
+                    chunks.append(AudioChunk(index=chunk_index, duration=duration, name=chunk_name, data=data))
+                    chunk_index += 1
+                    writer = None
+
+        for frame in container.decode(audio_stream):
+            frame.pts = None
+            feed_frames(resampler.resample(frame))
+
+        feed_frames(resampler.resample(None))
+
+        if writer is not None and writer.duration > 0:
+            data, duration = writer.finish()
+            chunk_name = f"{pathlib.Path(path).stem}_part{chunk_index + 1}.wav"
+            chunks.append(AudioChunk(index=chunk_index, duration=duration, name=chunk_name, data=data))
+
+        if not chunks:
+            return [
+                AudioChunk(
+                    index=0,
+                    duration=approx_duration or 0.0,
+                    name=pathlib.Path(path).name,
+                    path=path,
+                )
+            ]
+
+        return chunks
+    finally:
+        container.close()
+
+
 # ========= OpenAI (cloud) =========
 def _make_openai_client(api_key: Optional[str]):
     if OpenAI is None:
@@ -439,13 +588,51 @@ def _run_cloud(job_id: str, client: "OpenAI"):
         update_file_status(job_id, idx, "running")
         append_log(job_id, f"→ Envoi à OpenAI : {fmeta['name']}")
         try:
-            with open(fmeta["path"], "rb") as fh:
-                resp = client.audio.transcriptions.create(
-                    model=model_name,
-                    file=fh,
-                    language=lang,
+            chunks = _split_audio_for_openai(fmeta["path"])
+            if not chunks:
+                raise RuntimeError("Le fichier audio est vide ou illisible.")
+
+            total_chunks = len(chunks)
+            total_duration = sum(c.duration for c in chunks if c.duration)
+            if total_chunks > 1:
+                append_log(
+                    job_id,
+                    f"   Découpage en {total_chunks} segments ≤ 20 min (durée totale {_format_seconds(total_duration)}).",
                 )
-            text = (getattr(resp, "text", "") or "").strip()
+
+            chunk_texts: List[str] = []
+            for pos, chunk in enumerate(chunks, start=1):
+                if total_chunks > 1:
+                    append_log(
+                        job_id,
+                        f"      · Segment {pos}/{total_chunks} ({_format_seconds(chunk.duration)})",
+                    )
+
+                if chunk.path:
+                    with open(chunk.path, "rb") as fh:
+                        resp = client.audio.transcriptions.create(
+                            model=model_name,
+                            file=fh,
+                            language=lang,
+                        )
+                else:
+                    bio = io.BytesIO(chunk.data or b"")
+                    setattr(bio, "name", chunk.name)
+                    try:
+                        resp = client.audio.transcriptions.create(
+                            model=model_name,
+                            file=bio,
+                            language=lang,
+                        )
+                    finally:
+                        bio.close()
+
+                part_text = (getattr(resp, "text", "") or "").strip()
+                if part_text:
+                    chunk_texts.append(part_text)
+                set_file_progress(job_id, idx, pos / max(total_chunks, 1))
+
+            text = "\n\n".join(t for t in chunk_texts if t).strip()
 
             processed = text
             prompt_tmpl = OUTPUT_PROMPTS.get(output_type)

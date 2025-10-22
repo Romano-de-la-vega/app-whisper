@@ -68,9 +68,19 @@
         </div>
 
         <div class="field full">
-          <label for="files">Fichiers audio</label>
+          <div class="field-label-row">
+            <label for="files">Fichiers audio</label>
+            <div class="record-controls">
+              <span id="record-timer" class="record-timer" aria-live="polite">00:00:00</span>
+              <button id="record-btn" type="button" class="icon-button record">
+                <span class="dot" aria-hidden="true"></span>
+                Enregistrer
+              </button>
+            </div>
+          </div>
           <input id="files" name="files" type="file" multiple accept=".mp3,.wav,.m4a,.flac" />
           <small>Formats : mp3, wav, m4a, flac</small>
+          <small id="recording-hint"></small>
           <small id="estimate"></small>
         </div>
 
