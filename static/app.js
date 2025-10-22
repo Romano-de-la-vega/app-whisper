@@ -11,6 +11,9 @@ const langSelect = document.getElementById("lang");
 const filesInput = document.getElementById("files");
 const startBtn = document.getElementById("start");
 const resetBtn = document.getElementById("reset");
+const recordBtn = document.getElementById("record-btn");
+const recordingHint = document.getElementById("recording-hint");
+const recordTimer = document.getElementById("record-timer");
 
 const statusSection = document.getElementById("status");
 const progressBar = document.getElementById("progress");
@@ -57,6 +60,17 @@ let lastLogLength = 0;
 let isRunning = false;
 let totalDurationMin = 0;
 
+let mediaRecorder = null;
+let recordingChunks = [];
+let recordingStreams = [];
+let lastRecordedFile = null;
+let isRecording = false;
+let recordTimerInterval = null;
+let recordStartTime = 0;
+let audioContext = null;
+let audioDestination = null;
+let audioNodes = [];
+
 let particlesPromise = null;
 function loadParticles() {
   if (!particlesPromise) {
@@ -72,6 +86,299 @@ function setTranscribing(active) {
     if (active) p.start();
     else p.stop();
   });
+}
+
+function setRecordButtonState(active) {
+  if (!recordBtn) return;
+  recordBtn.classList.toggle("is-recording", !!active);
+  recordBtn.innerHTML = `<span class="dot" aria-hidden="true"></span>${active ? "Arrêter" : "Enregistrer"}`;
+}
+
+function resetRecordTimerDisplay() {
+  if (!recordTimer) return;
+  recordTimer.textContent = "00:00:00";
+  recordTimer.classList.remove("is-recording");
+}
+
+function updateRecordTimerDisplay() {
+  if (!recordTimer) return;
+  const elapsed = Math.max(0, Math.floor((Date.now() - recordStartTime) / 1000));
+  const hours = String(Math.floor(elapsed / 3600)).padStart(2, "0");
+  const minutes = String(Math.floor((elapsed % 3600) / 60)).padStart(2, "0");
+  const seconds = String(elapsed % 60).padStart(2, "0");
+  recordTimer.textContent = `${hours}:${minutes}:${seconds}`;
+}
+
+function startRecordTimer() {
+  if (!recordTimer) return;
+  recordStartTime = Date.now();
+  recordTimer.classList.add("is-recording");
+  updateRecordTimerDisplay();
+  if (recordTimerInterval) clearInterval(recordTimerInterval);
+  recordTimerInterval = setInterval(updateRecordTimerDisplay, 500);
+}
+
+function stopRecordTimer(resetDisplay = false) {
+  if (recordTimerInterval) {
+    clearInterval(recordTimerInterval);
+    recordTimerInterval = null;
+  }
+  if (!recordTimer) return;
+  if (!resetDisplay) {
+    updateRecordTimerDisplay();
+  }
+  recordTimer.classList.remove("is-recording");
+  if (resetDisplay) {
+    recordTimer.textContent = "00:00:00";
+  }
+}
+
+function updateRecordingHint(text = "", isError = false) {
+  if (!recordingHint) return;
+  recordingHint.textContent = text;
+  recordingHint.style.color = isError ? "#e33c3c" : "var(--muted)";
+}
+
+function stopRecordingStreams() {
+  recordingStreams.forEach((stream) => {
+    if (!stream) return;
+    stream.getTracks().forEach(track => {
+      try { track.stop(); } catch (_) { /* noop */ }
+    });
+  });
+  recordingStreams = [];
+
+  audioNodes.forEach(node => {
+    if (!node) return;
+    const { sourceNode, gainNode } = node;
+    try { sourceNode.disconnect(); } catch (_) { /* noop */ }
+    try { gainNode.disconnect(); } catch (_) { /* noop */ }
+  });
+  audioNodes = [];
+
+  if (audioDestination && audioDestination.stream) {
+    audioDestination.stream.getTracks().forEach(track => {
+      try { track.stop(); } catch (_) { /* noop */ }
+    });
+  }
+  audioDestination = null;
+
+  if (audioContext) {
+    try { audioContext.close(); } catch (_) { /* noop */ }
+  }
+  audioContext = null;
+}
+
+async function getSystemAudioStream() {
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== "function") {
+    throw new Error("La capture du son système n'est pas supportée sur ce navigateur.");
+  }
+
+  const attempts = [
+    { audio: { systemAudio: "include", suppressLocalAudioPlayback: false }, video: false },
+    { audio: { systemAudio: "include", selfBrowserSurface: "include", suppressLocalAudioPlayback: false }, video: false },
+    { audio: true, video: false },
+  ];
+
+  let lastError = null;
+  for (const constraints of attempts) {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
+      if (!stream) continue;
+      stream.getVideoTracks().forEach(track => {
+        try { track.stop(); } catch (_) { /* noop */ }
+      });
+      if (stream.getAudioTracks().length) {
+        return stream;
+      }
+      stream.getTracks().forEach(track => {
+        try { track.stop(); } catch (_) { /* noop */ }
+      });
+    } catch (err) {
+      lastError = err;
+      if (err && err.name === "NotAllowedError") {
+        throw err;
+      }
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  throw new Error("Aucun flux audio système disponible.");
+}
+
+async function startRecording() {
+  if (!recordBtn) return;
+  if (!navigator.mediaDevices || typeof MediaRecorder === "undefined") {
+    updateRecordingHint("Enregistrement non supporté sur ce navigateur.", true);
+    return;
+  }
+
+  recordBtn.disabled = true;
+  updateRecordingHint("Initialisation de l'enregistrement…");
+
+  try {
+    const micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      }
+    });
+    recordingStreams = [micStream];
+    const systemStream = await getSystemAudioStream();
+
+    const systemTracks = (systemStream && systemStream.getAudioTracks()) || [];
+    const audioTracks = [
+      ...micStream.getAudioTracks(),
+      ...systemTracks
+    ].filter(Boolean);
+
+    if (!audioTracks.length) {
+      throw new Error("Aucune piste audio détectée.");
+    }
+
+    const Context = window.AudioContext || window.webkitAudioContext;
+    if (!Context) {
+      throw new Error("Le mixage audio n'est pas supporté sur ce navigateur.");
+    }
+
+    audioContext = new Context();
+    if (audioContext.state === "suspended") {
+      try { await audioContext.resume(); } catch (_) { /* noop */ }
+    }
+
+    audioDestination = audioContext.createMediaStreamDestination();
+    audioNodes = [];
+
+    audioTracks.forEach(track => {
+      const trackStream = new MediaStream([track]);
+      const sourceNode = audioContext.createMediaStreamSource(trackStream);
+      const gainNode = audioContext.createGain();
+      gainNode.gain.value = 1;
+      sourceNode.connect(gainNode).connect(audioDestination);
+      audioNodes.push({ sourceNode, gainNode });
+    });
+
+    if (systemStream) {
+      systemTracks.forEach(track => {
+        track.onended = () => {
+          if (isRecording) {
+            updateRecordingHint("Le son du système s'est arrêté. L'enregistrement va se terminer.", true);
+            stopRecordingAction();
+          }
+        };
+      });
+      recordingStreams.push(systemStream);
+    }
+
+    recordingChunks = [];
+    mediaRecorder = new MediaRecorder(audioDestination.stream);
+
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) {
+        recordingChunks.push(event.data);
+      }
+    };
+
+    mediaRecorder.onstop = finalizeRecording;
+    mediaRecorder.onerror = (event) => {
+      console.error(event.error || event);
+      updateRecordingHint("Erreur d'enregistrement : " + (event.error ? event.error.message : event.message || event.type), true);
+      isRecording = false;
+      setRecordButtonState(false);
+      if (recordBtn) recordBtn.disabled = false;
+      stopRecordingStreams();
+      mediaRecorder = null;
+      recordingChunks = [];
+      stopRecordTimer(true);
+    };
+
+    mediaRecorder.start();
+    isRecording = true;
+    setRecordButtonState(true);
+    updateRecordingHint("Enregistrement en cours… micro et son système capturés.");
+    startRecordTimer();
+  } catch (err) {
+    console.error(err);
+    updateRecordingHint("Impossible de démarrer : " + (err && err.message ? err.message : err), true);
+    stopRecordingStreams();
+    mediaRecorder = null;
+    recordingChunks = [];
+    isRecording = false;
+    setRecordButtonState(false);
+    stopRecordTimer(true);
+  } finally {
+    recordBtn.disabled = false;
+  }
+}
+
+function stopRecordingAction() {
+  if (!isRecording || !mediaRecorder) return;
+  recordBtn.disabled = true;
+  updateRecordingHint("Finalisation de l'enregistrement…");
+  try {
+    mediaRecorder.stop();
+  } catch (err) {
+    console.error(err);
+    updateRecordingHint("Arrêt impossible : " + err.message, true);
+    recordBtn.disabled = false;
+  }
+}
+
+function finalizeRecording() {
+  const blob = new Blob(recordingChunks, { type: mediaRecorder && mediaRecorder.mimeType ? mediaRecorder.mimeType : "audio/webm" });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const filename = `enregistrement_${timestamp}.webm`;
+  const previousRecordedName = lastRecordedFile ? lastRecordedFile.name : null;
+  const previousRecordedSize = lastRecordedFile ? lastRecordedFile.size : null;
+  const newRecordedFile = new File([blob], filename, { type: blob.type, lastModified: Date.now() });
+  lastRecordedFile = newRecordedFile;
+
+  let dataTransfer;
+  try {
+    dataTransfer = new DataTransfer();
+  } catch (err) {
+    console.error(err);
+  }
+
+  if (!dataTransfer) {
+    updateRecordingHint("Enregistrement prêt mais impossible de l'ajouter automatiquement. Téléchargez-le manuellement.", true);
+    stopRecordingStreams();
+    isRecording = false;
+    setRecordButtonState(false);
+    if (recordBtn) recordBtn.disabled = false;
+    mediaRecorder = null;
+    recordingChunks = [];
+    return;
+  }
+
+  dataTransfer.items.add(newRecordedFile);
+
+  Array.from(filesInput.files || []).forEach((file) => {
+    if (previousRecordedName && file.name === previousRecordedName && file.size === previousRecordedSize) {
+      return;
+    }
+    if (file.name === newRecordedFile.name && file.size === newRecordedFile.size) {
+      return;
+    }
+    dataTransfer.items.add(file);
+  });
+
+  filesInput.files = dataTransfer.files;
+  filesInput.dispatchEvent(new Event("change"));
+
+  updateRecordingHint(`Enregistrement ajouté : ${filename}`);
+
+  isRecording = false;
+  setRecordButtonState(false);
+  if (recordBtn) recordBtn.disabled = false;
+  stopRecordingStreams();
+  mediaRecorder = null;
+  recordingChunks = [];
+  stopRecordTimer();
 }
 
 // ====== Config serveur ======
@@ -386,6 +693,21 @@ resetBtn.addEventListener("click", () => {
   isRunning = false;
   setTranscribing(false);
 
+  if (isRecording && mediaRecorder) {
+    try { mediaRecorder.stop(); } catch (_) { /* noop */ }
+  }
+  stopRecordingStreams();
+  mediaRecorder = null;
+  recordingChunks = [];
+  isRecording = false;
+  lastRecordedFile = null;
+  setRecordButtonState(false);
+  if (recordBtn) {
+    recordBtn.disabled = false;
+  }
+  updateRecordingHint("");
+  stopRecordTimer(true);
+
   // reset visuel du formulaire
   form.reset();
   statusSection.hidden = true;
@@ -416,3 +738,15 @@ filesInput.addEventListener("change", computeTotalDuration);
 fillModelOptions();
 fillLangOptions();
 updateEstimate();
+
+if (recordBtn) {
+  setRecordButtonState(false);
+  resetRecordTimerDisplay();
+  recordBtn.addEventListener("click", () => {
+    if (isRecording) {
+      stopRecordingAction();
+    } else {
+      startRecording();
+    }
+  });
+}
