@@ -5,8 +5,10 @@ import uuid
 import pathlib
 import threading
 import time
+import wave
+from contextlib import suppress
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
@@ -22,6 +24,10 @@ try:
     from openai import OpenAI  # lib openai >= 1.x
 except Exception:
     OpenAI = None  # type: ignore
+
+# ----- Audio utils
+import av
+from av.audio.resampler import AudioResampler
 
 # ----- Téléchargement Hugging Face (pour montrer la progression)
 try:
@@ -419,6 +425,129 @@ def run_job(job_id: str, api_key: Optional[str]):
         append_log(job_id, f"[ERREUR JOB] {e}")
 
 # ========= OpenAI (cloud) =========
+OPENAI_MAX_CHUNK_SECONDS = 20 * 60
+
+
+def _get_audio_duration_seconds(path: Path) -> float:
+    try:
+        with av.open(str(path)) as container:
+            if container.duration and container.duration > 0:
+                return float(container.duration) / float(av.time_base)
+            for stream in container.streams:
+                if stream.type != "audio":
+                    continue
+                if stream.duration and stream.time_base:
+                    return float(stream.duration * stream.time_base)
+                if stream.frames and stream.rate:
+                    return float(stream.frames) / float(stream.rate)
+    except Exception as exc:
+        logging.warning("Impossible de calculer la durée de %s : %s", path, exc)
+    return 0.0
+
+
+def _write_chunks_to_wav(src_path: Path, chunk_dir: Path, max_seconds: int) -> List[Path]:
+    container = av.open(str(src_path))
+    chunk_paths: List[Path] = []
+    wave_file: Optional[wave.Wave_write] = None
+    chunk_index = 0
+    chunk_samples_written = 0
+    target_rate = 16_000
+    bytes_per_sample = 2  # int16 mono
+    samples_per_chunk = max_seconds * target_rate
+    resampler = AudioResampler(format="s16", layout="mono", rate=target_rate)
+
+    def start_new_chunk() -> wave.Wave_write:
+        nonlocal chunk_index, chunk_samples_written
+        chunk_index += 1
+        chunk_samples_written = 0
+        chunk_path = chunk_dir / f"{src_path.stem}_part{chunk_index:02d}.wav"
+        wf = wave.open(str(chunk_path), "wb")
+        wf.setnchannels(1)
+        wf.setsampwidth(bytes_per_sample)
+        wf.setframerate(target_rate)
+        chunk_paths.append(chunk_path)
+        return wf
+
+    def close_chunk() -> None:
+        nonlocal wave_file
+        if wave_file is not None:
+            wave_file.close()
+            wave_file = None
+
+    def push_bytes(buffer: bytes) -> None:
+        nonlocal wave_file, chunk_samples_written
+        if not buffer:
+            return
+        offset = 0
+        buf_len = len(buffer)
+        while offset < buf_len:
+            if wave_file is None:
+                wave_file = start_new_chunk()
+            remaining_samples = samples_per_chunk - chunk_samples_written
+            if remaining_samples <= 0:
+                close_chunk()
+                wave_file = start_new_chunk()
+                remaining_samples = samples_per_chunk
+            bytes_to_write = min(remaining_samples * bytes_per_sample, buf_len - offset)
+            wave_file.writeframes(buffer[offset: offset + bytes_to_write])
+            chunk_samples_written += bytes_to_write // bytes_per_sample
+            offset += bytes_to_write
+            if chunk_samples_written >= samples_per_chunk:
+                close_chunk()
+
+    try:
+        audio_stream = next((s for s in container.streams if s.type == "audio"), None)
+        if audio_stream is None:
+            return []
+        for frame in container.decode(audio_stream):
+            resampled = resampler.resample(frame)
+            if resampled is None:
+                continue
+            if not isinstance(resampled, list):
+                resampled = [resampled]
+            for item in resampled:
+                push_bytes(item.planes[0].to_bytes())
+        flushed = resampler.flush()
+        if flushed:
+            if not isinstance(flushed, list):
+                flushed = [flushed]
+            for item in flushed:
+                push_bytes(item.planes[0].to_bytes())
+    finally:
+        close_chunk()
+        container.close()
+
+    return chunk_paths
+
+
+def _prepare_openai_chunks(src_path: Path, job_temp_dir: Path) -> Tuple[List[Path], float]:
+    duration = _get_audio_duration_seconds(src_path)
+    if duration <= 0 or duration <= OPENAI_MAX_CHUNK_SECONDS:
+        return [src_path], duration
+
+    chunk_dir = job_temp_dir / src_path.stem
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    for existing in chunk_dir.glob("*"):
+        with suppress(OSError):
+            existing.unlink()
+
+    try:
+        chunk_paths = _write_chunks_to_wav(src_path, chunk_dir, OPENAI_MAX_CHUNK_SECONDS)
+    except Exception as exc:
+        logging.warning("Découpage OpenAI impossible pour %s : %s", src_path, exc)
+        return [src_path], duration
+
+    if len(chunk_paths) <= 1:
+        for path in chunk_paths:
+            with suppress(OSError):
+                path.unlink()
+        with suppress(OSError):
+            chunk_dir.rmdir()
+        return [src_path], duration
+
+    return chunk_paths, duration
+
+
 def _make_openai_client(api_key: Optional[str]):
     if OpenAI is None:
         raise RuntimeError("Le package 'openai' n'est pas installé côté serveur.")
@@ -434,18 +563,49 @@ def _run_cloud(job_id: str, client: "OpenAI"):
     model_name = job["model"]
     lang = job["lang"]
     output_type = job.get("output_type", "transcription")
+    job_temp_dir = TEMP_DIR / job_id
+    job_temp_dir.mkdir(parents=True, exist_ok=True)
 
     for idx, fmeta in enumerate(job["files"]):
         update_file_status(job_id, idx, "running")
-        append_log(job_id, f"→ Envoi à OpenAI : {fmeta['name']}")
+        src_path = Path(fmeta["path"])
+        chunk_paths: List[Path] = []
+        duration_seconds = 0.0
         try:
-            with open(fmeta["path"], "rb") as fh:
-                resp = client.audio.transcriptions.create(
-                    model=model_name,
-                    file=fh,
-                    language=lang,
-                )
-            text = (getattr(resp, "text", "") or "").strip()
+            chunk_paths, duration_seconds = _prepare_openai_chunks(src_path, job_temp_dir)
+        except Exception as exc:
+            logging.warning("Découpage OpenAI échoué pour %s : %s", src_path, exc)
+            chunk_paths = [src_path]
+
+        append_log(job_id, f"→ Envoi à OpenAI : {fmeta['name']}")
+        if len(chunk_paths) > 1:
+            approx_minutes = duration_seconds / 60.0 if duration_seconds else 0.0
+            append_log(
+                job_id,
+                f"   Fichier long (~{approx_minutes:.1f} min) découpé en {len(chunk_paths)} segments (≤ 20 min).",
+            )
+        try:
+            aggregated_parts: List[str] = []
+            for part_idx, chunk_path in enumerate(chunk_paths):
+                if len(chunk_paths) > 1:
+                    append_log(
+                        job_id,
+                        f"   • Segment {part_idx + 1}/{len(chunk_paths)} : {chunk_path.name}",
+                    )
+                with open(chunk_path, "rb") as fh:
+                    resp = client.audio.transcriptions.create(
+                        model=model_name,
+                        file=fh,
+                        language=lang,
+                    )
+                part_text = (getattr(resp, "text", "") or "").strip()
+                if part_text:
+                    aggregated_parts.append(part_text)
+                if len(chunk_paths) > 1:
+                    progress = (part_idx + 1) / len(chunk_paths)
+                    set_file_progress(job_id, idx, min(progress, 0.95))
+
+            text = "\n".join(aggregated_parts).strip()
 
             processed = text
             prompt_tmpl = OUTPUT_PROMPTS.get(output_type)
@@ -481,6 +641,14 @@ def _run_cloud(job_id: str, client: "OpenAI"):
         except Exception as e:
             update_file_status(job_id, idx, "error", error=str(e))
             append_log(job_id, f"[ERREUR API] {fmeta['name']} : {e}")
+        finally:
+            if len(chunk_paths) > 1:
+                chunk_dir = chunk_paths[0].parent
+                for chunk_file in chunk_paths:
+                    with suppress(OSError):
+                        chunk_file.unlink()
+                with suppress(OSError):
+                    chunk_dir.rmdir()
 
         set_job_progress(job_id, (idx + 1) / max(total, 1))
 
