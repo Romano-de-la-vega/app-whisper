@@ -131,6 +131,141 @@ h1 {
 
 .field.full { grid-column: 1 / -1; }
 
+.field-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--panel-border);
+  background: transparent;
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+.icon-button:hover {
+  background: var(--panel-border);
+}
+
+.icon-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.icon-button.mini {
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 13px;
+}
+
+.record-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.icon-button.record {
+  gap: 6px;
+  background: transparent;
+  border: 1px solid #e33c3c;
+  color: #e33c3c;
+  padding: 6px 10px;
+  font-size: 14px;
+}
+
+.icon-button.record .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #e33c3c;
+  display: inline-block;
+}
+
+.icon-button.record.is-recording,
+.icon-button.record.is-recording:hover {
+  background: #e33c3c;
+  color: #fff;
+  border-color: #b92d2d;
+}
+
+.icon-button.record.is-recording .dot {
+  background: #fff;
+}
+
+.icon-button.record[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.recording-source-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.recording-source-wrap select {
+  max-width: 360px;
+}
+
+.recording-source-wrap .field-label-row {
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+#recording-hint {
+  min-height: 18px;
+}
+
+#recording-hint.is-error {
+  color: #e33c3c;
+}
+
+#recording-hint.is-warning {
+  color: #f59f00;
+}
+
+#recording-hint.is-success {
+  color: #1e9b6a;
+}
+
+#system-source-status {
+  min-height: 18px;
+}
+
+#system-source-status.is-error {
+  color: #e33c3c;
+}
+
+#system-source-status.is-warning {
+  color: #f59f00;
+}
+
+#system-source-status.is-success {
+  color: #1e9b6a;
+}
+
+.record-timer {
+  font-family: "SFMono-Regular", "Roboto Mono", "Menlo", monospace;
+  font-size: 14px;
+  color: var(--muted);
+  min-width: 72px;
+  text-align: right;
+}
+
+.record-timer.is-recording {
+  color: #e33c3c;
+}
+
 label {
   color: var(--muted);
   font-size: 14px;

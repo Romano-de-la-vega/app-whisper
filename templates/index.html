@@ -68,9 +68,30 @@
         </div>
 
         <div class="field full">
-          <label for="files">Fichiers audio</label>
+          <div class="field-label-row">
+            <label for="files">Fichiers audio</label>
+            <div class="record-controls">
+              <button id="record-btn" type="button" class="icon-button record">
+                <span class="dot" aria-hidden="true"></span>
+                Enregistrer
+              </button>
+              <span id="record-timer" class="record-timer">00:00:00</span>
+            </div>
+          </div>
           <input id="files" name="files" type="file" multiple accept=".mp3,.wav,.m4a,.flac" />
           <small>Formats : mp3, wav, m4a, flac</small>
+          <small id="recording-hint"></small>
+          <div id="system-source-wrap" class="recording-source-wrap">
+            <div class="field-label-row">
+              <label for="system-source">Son du PC</label>
+              <button id="system-source-refresh" type="button" class="icon-button mini" title="Actualiser les périphériques audio">↻</button>
+            </div>
+            <select id="system-source">
+              <option value="auto" selected>Auto (mixage système si disponible)</option>
+              <option value="none">Aucun (micro uniquement)</option>
+            </select>
+            <small id="system-source-status" class="muted"></small>
+          </div>
           <small id="estimate"></small>
         </div>
 
