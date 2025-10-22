@@ -17,6 +17,25 @@ from fastapi.templating import Jinja2Templates
 import av
 from av.audio.resampler import AudioResampler
 
+try:  # Native recorder (optional)
+    from native_recorder import (
+        NativeRecorder,
+        NativeRecorderBusy,
+        NativeRecorderError,
+        NativeRecorderNotRunning,
+        NativeRecorderUnsupported,
+    )
+except Exception:  # pragma: no cover - fallback when dependency missing
+    NativeRecorder = None  # type: ignore
+
+    class _NativeRecorderFallbackError(RuntimeError):
+        pass
+
+    NativeRecorderError = _NativeRecorderFallbackError  # type: ignore
+    NativeRecorderBusy = _NativeRecorderFallbackError  # type: ignore
+    NativeRecorderNotRunning = _NativeRecorderFallbackError  # type: ignore
+    NativeRecorderUnsupported = _NativeRecorderFallbackError  # type: ignore
+
 # ----- LOCAL (faster-whisper)
 from faster_whisper import WhisperModel
 
@@ -64,6 +83,15 @@ MODELS_DIR = _get_models_dir()
 
 for d in (UPLOAD_DIR, TRANS_DIR, TEMP_DIR, MODELS_DIR):
     d.mkdir(parents=True, exist_ok=True)
+
+# ========= Native recorder (optional) =========
+if NativeRecorder is not None:
+    try:
+        NATIVE_RECORDER = NativeRecorder(TEMP_DIR / "native_recordings")
+    except Exception:
+        NATIVE_RECORDER = None  # type: ignore
+else:
+    NATIVE_RECORDER = None  # type: ignore
 
 # ========= App, statiques & templates =========
 app = FastAPI(title="Transcripteur Whisper (Web)")
@@ -240,8 +268,66 @@ def index(request: Request):
             "langs": list(LANGS.keys()),
             "DEFAULT_MODEL_LOCAL": DEFAULT_MODEL_LOCAL,
             "DEFAULT_LANG": DEFAULT_LANG,
+            "native_recording_available": bool(getattr(NATIVE_RECORDER, "is_available", lambda: False)()),
         },
     )
+
+
+@app.post("/native/recordings/start")
+def native_recording_start():
+    recorder = NATIVE_RECORDER
+    if recorder is None or not getattr(recorder, "is_available", lambda: False)():
+        raise HTTPException(status_code=400, detail="L'enregistrement natif n'est pas disponible sur cette plateforme.")
+
+    try:
+        result = recorder.start()
+    except NativeRecorderBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except NativeRecorderUnsupported as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except NativeRecorderError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "recording_id": result.recording_id,
+    }
+
+
+@app.post("/native/recordings/{recording_id}/stop")
+def native_recording_stop(recording_id: str):
+    recorder = NATIVE_RECORDER
+    if recorder is None:
+        raise HTTPException(status_code=400, detail="Aucun enregistrement natif en cours.")
+
+    try:
+        result = recorder.stop(recording_id=recording_id)
+    except NativeRecorderNotRunning as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except NativeRecorderError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if not result.path.exists():
+        raise HTTPException(status_code=500, detail="Le fichier d'enregistrement n'a pas été créé.")
+
+    return {
+        "recording_id": result.recording_id,
+        "filename": result.path.name,
+        "duration": result.duration,
+        "download_url": f"/native/recordings/{result.recording_id}/file",
+    }
+
+
+@app.get("/native/recordings/{recording_id}/file")
+def native_recording_file(recording_id: str):
+    recorder = NATIVE_RECORDER
+    if recorder is None:
+        raise HTTPException(status_code=404, detail="Enregistrement introuvable.")
+
+    result = recorder.get_completed(recording_id)
+    if not result or not result.path.exists():
+        raise HTTPException(status_code=404, detail="Enregistrement introuvable.")
+
+    return FileResponse(result.path, filename=result.path.name, media_type="audio/wav")
 
 # ========= Jobs =========
 JOBS: Dict[str, Dict[str, Any]] = {}

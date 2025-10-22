@@ -11,3 +11,5 @@ huggingface_hub>=0.20.3
 tqdm>=4.66
 pyinstaller==6.15.0
 setuptools<81
+sounddevice>=0.4.7
+soundfile>=0.12.1
