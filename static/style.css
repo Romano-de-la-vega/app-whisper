@@ -131,6 +131,54 @@ h1 {
 
 .field.full { grid-column: 1 / -1; }
 
+.field-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.icon-button.record {
+  gap: 6px;
+  background: transparent;
+  border: 1px solid #e33c3c;
+  color: #e33c3c;
+  padding: 6px 10px;
+  font-size: 14px;
+}
+
+.icon-button.record .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #e33c3c;
+  display: inline-block;
+}
+
+.record-timer {
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  color: var(--muted);
+  min-width: 72px;
+  text-align: right;
+}
+
+.icon-button.record.is-recording,
+.icon-button.record.is-recording:hover {
+  background: #e33c3c;
+  color: #fff;
+  border-color: #b92d2d;
+}
+
+.icon-button.record.is-recording .dot {
+  background: #fff;
+}
+
+.icon-button.record[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 label {
   color: var(--muted);
   font-size: 14px;
