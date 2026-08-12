@@ -17,13 +17,17 @@ const recordTimer = document.getElementById("record-timer");
 
 const statusSection = document.getElementById("status");
 const progressBar = document.getElementById("progress");
+const progressWrap = document.getElementById("progress-wrap");
 const jobIdSpan = document.getElementById("job-id");
 const jobStateSpan = document.getElementById("job-state");
 const filesList = document.getElementById("files-list");
 const logsPre = document.getElementById("logs");
 const downloadWrap = document.getElementById("downloads");
+const transcriptionBtn = document.getElementById("btn-transcription");
 const summaryBtn = document.getElementById("btn-summary");
+const zipBtn = document.getElementById("btn-zip");
 const estimateNode = document.getElementById("estimate");
+const formError = document.getElementById("form-error");
 
 const OUTPUT_LABELS = {
   transcription: "Télécharger la transcription (TXT)",
@@ -36,6 +40,35 @@ const OUTPUT_LABELS = {
   support_formation: "Télécharger le support de formation (TXT)",
 };
 
+const STATUS_LABELS = {
+  pending: "En attente",
+  queued: "En file d'attente",
+  running: "En cours",
+  cancelling: "Annulation en cours…",
+  done: "Terminé",
+  partial: "Terminé avec des erreurs",
+  error: "Échec",
+  cancelled: "Annulé",
+};
+
+const STAGE_LABELS = {
+  queued: "En file d'attente",
+  conversion: "Conversion en MP3",
+  transcription_api: "Transcription API",
+  transcription_local: "Transcription locale",
+  recomposition: "Recomposition de la transcription",
+  document: "Génération du document",
+  done: "Terminé",
+  error: "Échec",
+  cancelled: "Annulé",
+};
+
+const TERMINAL_STATUSES = new Set(["done", "partial", "error", "cancelled"]);
+const DOWNLOADABLE_STATUSES = new Set(["done", "partial"]);
+const DEFAULT_EXTENSIONS = [".aac", ".flac", ".m4a", ".mp3", ".mp4", ".mpga", ".ogg", ".wav", ".webm", ".mkv", ".mov"];
+const POLL_INTERVAL_MS = 1000;
+const CSRF_HEADER = "X-Whisper-CSRF";
+
 const themeBtn = document.getElementById("toggle-theme");
 const logoImg = document.getElementById("logo");
 const bodyEl = document.body;
@@ -43,22 +76,51 @@ const bodyEl = document.body;
 // Masquer les boutons de téléchargement tant que la transcription n'est pas terminée
 downloadWrap.hidden = true;
 
+function jobHasSummary(job) {
+  const outputType = String(job?.output_type || "").toLowerCase();
+  if (!outputType || outputType === "transcription") return false;
+  const suffix = `_${outputType}.txt`;
+  return Array.isArray(job?.files) && job.files.some((file) =>
+    typeof file?.output_name === "string" && file.output_name.toLowerCase().endsWith(suffix)
+  );
+}
+
 function updateSummaryBtnLabel() {
-  const show = modeSelect.value === "api" && outputTypeSelect.value !== "transcription";
+  const completedJob = lastJobSnapshot && DOWNLOADABLE_STATUSES.has(lastJobSnapshot.status)
+    ? lastJobSnapshot
+    : null;
+  const outputType = completedJob?.output_type || outputTypeSelect.value;
+  const show = completedJob
+    ? Boolean(completedJob.use_api && jobHasSummary(completedJob))
+    : modeSelect.value === "api" && outputType !== "transcription";
   summaryBtn.style.display = show ? "inline-flex" : "none";
   if (show) {
-    summaryBtn.textContent = OUTPUT_LABELS[outputTypeSelect.value] || "Télécharger le document (TXT)";
+    summaryBtn.textContent = OUTPUT_LABELS[outputType] || "Télécharger le document (TXT)";
   }
 }
 outputTypeSelect.addEventListener("change", updateSummaryBtnLabel);
-updateSummaryBtnLabel();
 
 // ====== État local ======
 let pollTimer = null;
 let currentJobId = null;
-let lastLogLength = 0;
+let lastJobSnapshot = null;
+let lastLogsText = "";
 let isRunning = false;
+let pollFailureCount = 0;
+let displayedProgressPct = 0;
+let submitAbortController = null;
+let cancelInFlight = false;
+let suppressAbortMessage = false;
 let totalDurationMin = 0;
+let durationRequestId = 0;
+
+let supportedExtensions = new Set(DEFAULT_EXTENSIONS);
+let maxUploadMb = 2048;
+let maxFiles = 50;
+let maxJobUploadMb = Number.POSITIVE_INFINITY;
+let apiChunkMinutes = 10;
+let csrfToken = "";
+let configurationError = "";
 
 let mediaRecorder = null;
 let recordingChunks = [];
@@ -69,11 +131,18 @@ let recordTimerInterval = null;
 let recordStartTime = 0;
 let supportsNativeRecording = false;
 let nativeRecordingId = null;
+let discardRecordingOnStop = false;
+let recordingMimeType = "audio/webm";
 
 let particlesPromise = null;
 function loadParticles() {
   if (!particlesPromise) {
-    particlesPromise = import("./particles.js").then(() => window.Particles);
+    particlesPromise = import("./particles.js")
+      .then(() => window.Particles)
+      .catch((error) => {
+        console.warn("Animation de fond indisponible", error);
+        return null;
+      });
   }
   return particlesPromise;
 }
@@ -90,7 +159,10 @@ function setTranscribing(active) {
 function setRecordButtonState(active) {
   if (!recordBtn) return;
   recordBtn.classList.toggle("is-recording", !!active);
-  recordBtn.innerHTML = `<span class="dot" aria-hidden="true"></span>${active ? "Arrêter" : "Enregistrer"}`;
+  const dot = document.createElement("span");
+  dot.className = "dot";
+  dot.setAttribute("aria-hidden", "true");
+  recordBtn.replaceChildren(dot, document.createTextNode(active ? "Arrêter" : "Enregistrer"));
 }
 
 function resetRecordTimerDisplay() {
@@ -138,6 +210,146 @@ function updateRecordingHint(text = "", isError = false) {
   recordingHint.style.color = isError ? "#e33c3c" : "var(--muted)";
 }
 
+function showFormMessage(message = "", kind = "error") {
+  if (!formError) return;
+  formError.textContent = message;
+  formError.hidden = !message;
+  formError.classList.toggle("is-warning", Boolean(message) && kind === "warning");
+}
+
+async function readResponseError(response, fallback = `Erreur HTTP ${response.status}`) {
+  const contentType = response.headers.get("content-type") || "";
+  try {
+    if (contentType.includes("application/json")) {
+      const payload = await response.json();
+      if (typeof payload?.detail === "string") return payload.detail;
+      if (Array.isArray(payload?.detail)) {
+        return payload.detail
+          .map((item) => item?.msg || item?.message || String(item))
+          .join(" · ");
+      }
+      if (typeof payload?.message === "string") return payload.message;
+    } else {
+      const text = (await response.text()).trim();
+      if (text) return text;
+    }
+  } catch (error) {
+    console.warn("Réponse d'erreur illisible", error);
+  }
+  return fallback;
+}
+
+function postWithCsrf(url, options = {}) {
+  if (!csrfToken) {
+    throw new Error(configurationError || "Configuration de sécurité invalide : jeton CSRF absent.");
+  }
+  const headers = new Headers(options.headers || {});
+  headers.set(CSRF_HEADER, csrfToken);
+  return fetch(url, { ...options, method: "POST", headers });
+}
+
+function setGlobalProgress(progress, status = "") {
+  let pct = formatPct(progress);
+  if ((status === "error" || status === "cancelled") && pct >= 100) {
+    pct = Math.min(displayedProgressPct, 99);
+  }
+  displayedProgressPct = pct;
+  progressBar.style.width = `${pct}%`;
+  if (progressWrap) {
+    progressWrap.setAttribute("aria-valuenow", String(pct));
+    progressWrap.setAttribute("aria-valuetext", `${pct} % — ${STATUS_LABELS[status] || status || "En attente"}`);
+  }
+}
+
+function setControlsLocked(locked) {
+  [modeSelect, apiKeyInput, outputTypeSelect, modelSelect, langSelect, filesInput].forEach((control) => {
+    if (control) control.disabled = locked;
+  });
+  if (recordBtn) recordBtn.disabled = locked || Boolean(configurationError);
+}
+
+function setStartButton(active, { cancelling = false, uploading = false } = {}) {
+  startBtn.classList.toggle("danger", active);
+  if (!active) {
+    startBtn.textContent = "Lancer la transcription";
+    startBtn.disabled = Boolean(configurationError);
+    return;
+  }
+  startBtn.textContent = cancelling
+    ? "Annulation en cours…"
+    : uploading
+      ? "Annuler le téléversement"
+      : "Arrêter la transcription";
+  startBtn.disabled = cancelling;
+}
+
+function stopPolling() {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = null;
+}
+
+function schedulePoll(delay = POLL_INTERVAL_MS) {
+  stopPolling();
+  if (!currentJobId || !isRunning) return;
+  const expectedJobId = currentJobId;
+  pollTimer = setTimeout(() => pollStatus(expectedJobId), delay);
+}
+
+function fileExtension(filename) {
+  const match = /(?:^|\.)([^.]+)$/.exec(filename || "");
+  return match ? `.${match[1].toLowerCase()}` : "";
+}
+
+function formatMegabytes(value) {
+  return new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 2 }).format(value);
+}
+
+function validateSelectedFiles({ display = true } = {}) {
+  const files = Array.from(filesInput.files || []);
+  const errors = [];
+
+  if (configurationError) errors.push(configurationError);
+
+  if (!files.length) {
+    errors.push("Ajoutez au moins un fichier audio ou vidéo.");
+  }
+  if (files.length > maxFiles) {
+    errors.push(`Vous pouvez envoyer au maximum ${maxFiles} fichiers par traitement.`);
+  }
+
+  const maxBytes = maxUploadMb * 1024 * 1024;
+  const totalBytes = files.reduce((sum, file) => sum + Math.max(0, Number(file.size) || 0), 0);
+  const maxJobBytes = maxJobUploadMb * 1024 * 1024;
+  if (Number.isFinite(maxJobBytes) && maxJobBytes > 0 && totalBytes > maxJobBytes) {
+    errors.push(
+      `La taille totale du lot (${formatMegabytes(totalBytes / (1024 * 1024))} Mo) ` +
+      `dépasse la limite de ${formatMegabytes(maxJobUploadMb)} Mo.`,
+    );
+  }
+
+  files.forEach((file) => {
+    const extension = fileExtension(file.name);
+    if (!supportedExtensions.has(extension)) {
+      errors.push(`Format non pris en charge : ${file.name}.`);
+    }
+    if (file.size <= 0) {
+      errors.push(`Le fichier ${file.name} est vide.`);
+    } else if (Number.isFinite(maxBytes) && maxBytes > 0 && file.size > maxBytes) {
+      errors.push(`Le fichier ${file.name} dépasse la limite de ${maxUploadMb} Mo.`);
+    }
+  });
+
+  if (isRecording) {
+    errors.push("Arrêtez et finalisez l'enregistrement avant de lancer la transcription.");
+  }
+  if (!modelSelect.value) errors.push("Aucun modèle de transcription n'est disponible.");
+  if (!langSelect.value) errors.push("Aucune langue n'est sélectionnée.");
+
+  const message = errors.slice(0, 4).join(" ") + (errors.length > 4 ? ` (+${errors.length - 4} autre(s) erreur(s))` : "");
+  if (display) showFormMessage(message);
+  return errors.length === 0;
+}
+
 function stopRecordingStreams() {
   recordingStreams.forEach((stream) => {
     if (!stream) return;
@@ -160,7 +372,9 @@ async function startBrowserRecording() {
 
   try {
     const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recordingStreams = [micStream];
     const systemStream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
+    recordingStreams.push(systemStream);
 
     systemStream.getVideoTracks().forEach(track => { track.enabled = false; });
 
@@ -175,9 +389,11 @@ async function startBrowserRecording() {
 
     const mixedStream = new MediaStream(audioTracks);
 
-    recordingStreams = [micStream, systemStream, mixedStream];
+    recordingStreams.push(mixedStream);
     recordingChunks = [];
+    discardRecordingOnStop = false;
     mediaRecorder = new MediaRecorder(mixedStream);
+    recordingMimeType = mediaRecorder.mimeType || "audio/webm";
 
     mediaRecorder.ondataavailable = (event) => {
       if (event.data && event.data.size > 0) {
@@ -236,9 +452,9 @@ async function startNativeRecording() {
   updateRecordingHint("Initialisation de l'enregistrement natif…");
 
   try {
-    const res = await fetch("/native/recordings/start", { method: "POST" });
+    const res = await postWithCsrf("/native/recordings/start");
     if (!res.ok) {
-      const message = await res.text();
+      const message = await readResponseError(res);
       throw new Error(message || `Statut ${res.status}`);
     }
     const data = await res.json();
@@ -272,9 +488,9 @@ async function stopNativeRecording() {
   updateRecordingHint("Finalisation de l'enregistrement natif…");
 
   try {
-    const res = await fetch(`/native/recordings/${nativeRecordingId}/stop`, { method: "POST" });
+    const res = await postWithCsrf(`/native/recordings/${nativeRecordingId}/stop`);
     if (!res.ok) {
-      const message = await res.text();
+      const message = await readResponseError(res);
       throw new Error(message || `Statut ${res.status}`);
     }
     const data = await res.json();
@@ -346,10 +562,44 @@ function attachRecordedFile(newFile, hintMessage) {
   return true;
 }
 
+function recordingExtension(mimeType) {
+  const normalized = (mimeType || "").toLowerCase();
+  if (normalized.includes("mp4")) return ".mp4";
+  if (normalized.includes("ogg")) return ".ogg";
+  if (normalized.includes("wav")) return ".wav";
+  return ".webm";
+}
+
 function finalizeRecording() {
-  const blob = new Blob(recordingChunks, { type: mediaRecorder && mediaRecorder.mimeType ? mediaRecorder.mimeType : "audio/webm" });
+  const chunks = recordingChunks.slice();
+  const mimeType = recordingMimeType || "audio/webm";
+
+  if (discardRecordingOnStop) {
+    discardRecordingOnStop = false;
+    stopRecordingStreams();
+    isRecording = false;
+    mediaRecorder = null;
+    recordingChunks = [];
+    setRecordButtonState(false);
+    stopRecordTimer(true);
+    return;
+  }
+
+  const blob = new Blob(chunks, { type: mimeType });
+  if (!blob.size) {
+    updateRecordingHint("L'enregistrement est vide et n'a pas été ajouté.", true);
+    stopRecordingStreams();
+    isRecording = false;
+    mediaRecorder = null;
+    recordingChunks = [];
+    setRecordButtonState(false);
+    if (recordBtn) recordBtn.disabled = false;
+    stopRecordTimer(true);
+    return;
+  }
+
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const filename = `enregistrement_${timestamp}.webm`;
+  const filename = `enregistrement_${timestamp}${recordingExtension(mimeType)}`;
   const newRecordedFile = new File([blob], filename, { type: blob.type, lastModified: Date.now() });
   const ok = attachRecordedFile(newRecordedFile, `Enregistrement ajouté : ${filename}`);
 
@@ -360,6 +610,7 @@ function finalizeRecording() {
     if (recordBtn) recordBtn.disabled = false;
     mediaRecorder = null;
     recordingChunks = [];
+    stopRecordTimer(true);
     return;
   }
 
@@ -375,13 +626,50 @@ function finalizeRecording() {
 // ====== Config serveur ======
 (function initConfig() {
   const node = document.getElementById("whisper-config");
-  const cfg = JSON.parse(node.textContent || "{}");
+  let cfg = {};
+  try {
+    cfg = JSON.parse(node?.textContent || "{}");
+  } catch (error) {
+    console.error("Configuration serveur invalide", error);
+    showFormMessage("La configuration de l'application est invalide. Rechargez la page ou consultez les journaux.");
+  }
   window.MODELS_LOCAL = cfg.MODELS_LOCAL || [];
   window.MODELS_CLOUD = cfg.MODELS_CLOUD || [];
   window.LANGS = cfg.LANGS || [];
   window.DEFAULT_MODEL_LOCAL = cfg.DEFAULT_MODEL_LOCAL || (window.MODELS_LOCAL[0] || "");
   window.DEFAULT_LANG = cfg.DEFAULT_LANG || (window.LANGS[0] || "fr");
   supportsNativeRecording = Boolean(cfg.nativeRecorderAvailable);
+  csrfToken = typeof cfg.csrfToken === "string" ? cfg.csrfToken.trim() : "";
+  if (!csrfToken) {
+    configurationError = "Configuration de sécurité invalide : jeton CSRF absent. Rechargez la page.";
+    showFormMessage(configurationError);
+  }
+
+  const configuredExtensions = Array.isArray(cfg.supportedExtensions)
+    ? cfg.supportedExtensions
+        .map((extension) => String(extension).trim().toLowerCase())
+        .filter(Boolean)
+        .map((extension) => extension.startsWith(".") ? extension : `.${extension}`)
+    : DEFAULT_EXTENSIONS;
+  supportedExtensions = new Set(configuredExtensions.length ? configuredExtensions : DEFAULT_EXTENSIONS);
+  filesInput.accept = Array.from(supportedExtensions).join(",");
+
+  const configuredMaxUploadMb = Number(cfg.maxUploadMb);
+  if (Number.isFinite(configuredMaxUploadMb) && configuredMaxUploadMb > 0) {
+    maxUploadMb = configuredMaxUploadMb;
+  }
+  const configuredMaxFiles = Number(cfg.maxFiles);
+  if (Number.isInteger(configuredMaxFiles) && configuredMaxFiles > 0) {
+    maxFiles = configuredMaxFiles;
+  }
+  const configuredMaxJobUploadMb = Number(cfg.maxJobUploadMb);
+  if (Number.isFinite(configuredMaxJobUploadMb) && configuredMaxJobUploadMb > 0) {
+    maxJobUploadMb = configuredMaxJobUploadMb;
+  }
+  const configuredChunkMinutes = Number(cfg.apiChunkMinutes);
+  if (Number.isFinite(configuredChunkMinutes) && configuredChunkMinutes > 0) {
+    apiChunkMinutes = configuredChunkMinutes;
+  }
 })();
 
 // ====== Thème (persistance localStorage) ======
@@ -436,34 +724,45 @@ const LOCAL_RATES = {
   "Large v3 (CPU lourd)": 4.9,
   "Large v3 Turbo (recommandé)": 1.75
 };
-const API_RATES = {
-  "whisper-1": 0.006,
-  "gpt-4o-transcribe": 0.006,
-  "gpt-4o-mini-transcribe": 0.003
-};
-
 async function computeTotalDuration() {
+  const requestId = ++durationRequestId;
   const files = Array.from(filesInput.files || []);
+  validateSelectedFiles({ display: files.length > 0 });
   if (!files.length) {
+    showFormMessage(configurationError);
     totalDurationMin = 0;
     updateEstimate();
     return;
   }
   const durations = await Promise.all(files.map(getAudioDuration));
+  if (requestId !== durationRequestId) return;
   totalDurationMin = durations.reduce((a, b) => a + b, 0) / 60;
   updateEstimate();
 }
 
 function getAudioDuration(file) {
   return new Promise(resolve => {
-    const url = URL.createObjectURL(file);
+    let url;
+    try {
+      url = URL.createObjectURL(file);
+    } catch (_) {
+      resolve(0);
+      return;
+    }
     const audio = document.createElement("audio");
-    audio.preload = "metadata";
-    audio.onloadedmetadata = () => {
+    let settled = false;
+    const finish = (duration = 0) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
       URL.revokeObjectURL(url);
-      resolve(audio.duration || 0);
+      audio.removeAttribute("src");
+      resolve(Number.isFinite(duration) && duration > 0 ? duration : 0);
     };
-    audio.onerror = () => resolve(0);
+    const timeoutId = setTimeout(() => finish(0), 15000);
+    audio.preload = "metadata";
+    audio.onloadedmetadata = () => finish(audio.duration);
+    audio.onerror = () => finish(0);
     audio.src = url;
   });
 }
@@ -477,29 +776,81 @@ function updateEstimate() {
     if (mode === "local" && LOCAL_RATES[model]) {
       const est = (totalDurationMin * LOCAL_RATES[model]).toFixed(2);
       text = `Estimation temps : ${est} min`;
-    } else if (mode === "api" && API_RATES[model]) {
-      const est = (totalDurationMin * API_RATES[model]).toFixed(2);
-      text = `Coût estimé : ${est} €`;
+    } else if (mode === "api") {
+      const segmentCount = Math.max(1, Math.ceil(totalDurationMin / apiChunkMinutes));
+      text = `Durée audio : ${totalDurationMin.toFixed(1)} min · environ ${segmentCount} segment(s) API`;
     }
   }
   estimateNode.textContent = text;
 }
 
 // ====== Rendu ======
-function formatPct(p) { return Math.round((p || 0) * 100); }
+function formatPct(progress) {
+  const value = Number(progress);
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value * 100)));
+}
+
+function fileStageLabel(file) {
+  const stage = file?.stage || file?.status || "queued";
+  let label = STAGE_LABELS[stage] || STATUS_LABELS[stage] || stage;
+  const segmentCount = Math.max(0, Number(file?.segment_count) || 0);
+  const segmentIndex = Math.max(0, Number(file?.segment_index) || 0);
+  if (stage === "transcription_api" && segmentCount > 0) {
+    label += ` — segment ${Math.min(segmentIndex, segmentCount)}/${segmentCount}`;
+  } else if (stage === "conversion" && modeSelect.value === "api") {
+    label += ` — préparation MP3 (segments de ${apiChunkMinutes} min maximum)`;
+  } else if (stage === "conversion" && segmentCount > 1) {
+    label += ` — préparation de ${segmentCount} segments`;
+  }
+  return label;
+}
 
 function renderFiles(files) {
-  filesList.innerHTML = "";
+  filesList.replaceChildren();
   (files || []).forEach((f) => {
-    const pct = f.status === "done" ? 100 : Math.min(100, formatPct(f.progress || 0));
+    let pct = f.status === "done" ? 100 : formatPct(f.progress);
+    if ((f.status === "error" || f.status === "cancelled") && pct >= 100) pct = 99;
+
     const row = document.createElement("div");
     row.className = "file-row";
-    row.innerHTML = `
-      <div class="name">${f.name}</div>
-      <div class="state">État : ${f.status}${f.error ? " — " + f.error : ""}</div>
-      <div class="row-progress"><div style="width:${pct}%"></div></div>
-      ${f.out_path ? `<div class="state">Sortie : ${f.out_path.split("/").pop()}</div>` : ""}
-    `;
+    const safeStatus = /^[a-z_]+$/.test(f.status || "") ? f.status : "unknown";
+    row.classList.add(`status-${safeStatus}`);
+
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = f.name || "Fichier sans nom";
+
+    const state = document.createElement("div");
+    state.className = "state";
+    const statusLabel = STATUS_LABELS[f.status] || f.status || "Inconnu";
+    state.textContent = `État : ${statusLabel} · ${fileStageLabel(f)}`;
+
+    const rowProgress = document.createElement("div");
+    rowProgress.className = "row-progress";
+    rowProgress.setAttribute("role", "progressbar");
+    rowProgress.setAttribute("aria-label", `Progression de ${f.name || "ce fichier"}`);
+    rowProgress.setAttribute("aria-valuemin", "0");
+    rowProgress.setAttribute("aria-valuemax", "100");
+    rowProgress.setAttribute("aria-valuenow", String(pct));
+    const rowProgressBar = document.createElement("div");
+    rowProgressBar.style.width = `${pct}%`;
+    rowProgress.appendChild(rowProgressBar);
+
+    row.append(name, state, rowProgress);
+
+    if (f.error) {
+      const error = document.createElement("div");
+      error.className = "state file-error";
+      error.textContent = `Erreur : ${f.error}`;
+      row.appendChild(error);
+    }
+    if (f.output_name) {
+      const output = document.createElement("div");
+      output.className = "state";
+      output.textContent = `Sortie : ${f.output_name}`;
+      row.appendChild(output);
+    }
     filesList.appendChild(row);
   });
 }
@@ -510,234 +861,365 @@ function autoscrollLogs() {
 }
 
 // ====== Téléchargements ======
-async function downloadZip(jobId) {
-  try {
-    const res = await fetch(`/api/download/${jobId}`, { method: 'GET', cache: 'no-store' });
-    if (!res.ok) { alert(`Échec ZIP (${res.status}).`); return; }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `transcriptions_${jobId}.zip`;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-  } catch (e) { alert('Échec du téléchargement ZIP : ' + e); }
+function filenameFromDisposition(disposition, fallback) {
+  if (!disposition) return fallback;
+  const utf8Match = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+  if (utf8Match?.[1]) {
+    try { return decodeURIComponent(utf8Match[1]); } catch (_) { /* utilise le secours */ }
+  }
+  const match = /filename="?([^";]+)"?/i.exec(disposition);
+  return match?.[1] || fallback;
 }
-window.downloadZip = downloadZip;
 
-async function downloadTxt(jobId, kind = 'transcription', merge = true) {
+async function downloadFile(url, fallbackFilename, button) {
+  if (!currentJobId) {
+    showFormMessage("Aucun traitement actif à télécharger.");
+    return;
+  }
+  if (button) button.disabled = true;
   try {
-    const res = await fetch(`/api/download-txt/${jobId}?merge=${merge ? 1 : 0}&kind=${kind}`, { method: 'GET', cache: 'no-store' });
-    if (!res.ok) { alert(`Échec TXT (${res.status}).`); return; }
-    const disposition = res.headers.get('Content-Disposition');
-    let filename = `transcriptions_${jobId}.txt`;
-    if (disposition) {
-      const match = /filename="?([^";]+)"?/i.exec(disposition);
-      if (match && match[1]) filename = match[1];
-    }
+    const res = await fetch(url, { method: "GET", cache: "no-store" });
+    if (!res.ok) throw new Error(await readResponseError(res, `Téléchargement impossible (${res.status}).`));
     const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-  } catch (e) { alert('Échec du téléchargement TXT : ' + e); }
+    const filename = filenameFromDisposition(res.headers.get("Content-Disposition"), fallbackFilename);
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  } catch (error) {
+    console.error(error);
+    showFormMessage(`Échec du téléchargement : ${error.message || error}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
-window.downloadTxt = downloadTxt;
+
+async function downloadZip(jobId) {
+  return downloadFile(`/api/download/${encodeURIComponent(jobId)}`, `transcriptions_${jobId}.zip`, zipBtn);
+}
+
+async function downloadTxt(jobId, kind = "transcription", merge = true) {
+  const query = new URLSearchParams({ merge: merge ? "1" : "0", kind });
+  return downloadFile(
+    `/api/download-txt/${encodeURIComponent(jobId)}?${query}`,
+    `transcriptions_${jobId}.txt`,
+    kind === "summary" ? summaryBtn : transcriptionBtn,
+  );
+}
+
+if (transcriptionBtn) {
+  transcriptionBtn.addEventListener("click", () => currentJobId && downloadTxt(currentJobId, "transcription", true));
+}
+if (summaryBtn) {
+  summaryBtn.addEventListener("click", () => currentJobId && downloadTxt(currentJobId, "summary", true));
+}
+if (zipBtn) {
+  zipBtn.addEventListener("click", () => currentJobId && downloadZip(currentJobId));
+}
 
 
 // ====== Polling ======
-async function pollStatus() {
-  if (!currentJobId) return;
+function renderJob(job) {
+  lastJobSnapshot = job || null;
+  const status = job?.status || "pending";
+  jobIdSpan.textContent = currentJobId ? `Job : ${currentJobId}` : "";
+  jobStateSpan.textContent = STATUS_LABELS[status] || status;
+  jobStateSpan.dataset.status = status;
+  setGlobalProgress(job?.progress, status);
+  renderFiles(job?.files);
+
+  const canDownload = DOWNLOADABLE_STATUSES.has(status);
+  downloadWrap.hidden = !canDownload;
+  const showSummary = canDownload && job?.use_api && jobHasSummary(job);
+  summaryBtn.style.display = showSummary ? "inline-flex" : "none";
+  if (showSummary) {
+    summaryBtn.textContent = OUTPUT_LABELS[job.output_type] || "Télécharger le document (TXT)";
+  }
+
+  const logsText = Array.isArray(job?.logs) ? job.logs.join("\n") : "";
+  if (logsText !== lastLogsText) {
+    logsPre.textContent = logsText;
+    lastLogsText = logsText;
+    autoscrollLogs();
+  }
+
+  if (status === "partial") {
+    showFormMessage("Le traitement est terminé avec certaines erreurs. Les résultats disponibles peuvent être téléchargés.", "warning");
+  } else if (status === "error") {
+    showFormMessage("Le traitement a échoué. Consultez le détail par fichier et les journaux ci-dessous.");
+  } else if (status === "cancelled") {
+    showFormMessage("Le traitement a été annulé.", "warning");
+  } else {
+    showFormMessage(configurationError);
+  }
+}
+
+function finishRun() {
+  stopPolling();
+  isRunning = false;
+  cancelInFlight = false;
+  submitAbortController = null;
+  setTranscribing(false);
+  setControlsLocked(false);
+  setStartButton(false);
+  form.setAttribute("aria-busy", "false");
+  statusSection.setAttribute("aria-busy", "false");
+}
+
+async function pollStatus(expectedJobId = currentJobId) {
+  if (!expectedJobId || expectedJobId !== currentJobId || !isRunning) return;
+  pollTimer = null;
   try {
-    const res = await fetch(`/api/status/${currentJobId}`);
-    if (!res.ok) throw new Error(await res.text());
+    const res = await fetch(`/api/status/${encodeURIComponent(expectedJobId)}`, { cache: "no-store" });
+    if (!res.ok) {
+      const error = new Error(await readResponseError(res, `Suivi impossible (${res.status}).`));
+      error.status = res.status;
+      throw error;
+    }
     const job = await res.json();
+    if (expectedJobId !== currentJobId || !isRunning) return;
 
-    jobIdSpan.textContent = `Job : ${currentJobId}`;
-    jobStateSpan.textContent = job.status;
-    progressBar.style.width = `${formatPct(job.progress)}%`;
-    renderFiles(job.files);
-
-    // Assurer l'affichage correct des boutons selon l'état et le mode
-    downloadWrap.hidden = job.status !== "done";
-    const showSummary = job.use_api && job.output_type && job.output_type !== "transcription";
-    summaryBtn.style.display = showSummary ? "inline-flex" : "none";
-    if (showSummary) {
-      summaryBtn.textContent = OUTPUT_LABELS[job.output_type] || "Télécharger le document (TXT)";
-    }
-
-    if (Array.isArray(job.logs)) {
-      const slice = job.logs.slice(lastLogLength).join("\n");
-      if (slice.trim().length) {
-        logsPre.textContent += (logsPre.textContent ? "\n" : "") + slice;
-        lastLogLength = job.logs.length;
-        autoscrollLogs();
-      }
-    }
-
-    if (job.status === "done" || job.status === "error") {
-      progressBar.style.width = "100%";
-      clearInterval(pollTimer); pollTimer = null;
-      isRunning = false;
-      setTranscribing(false);
-      startBtn.disabled = false;
-      startBtn.textContent = "Lancer la transcription";
-      startBtn.classList.remove("danger");
-    }
-
-    
-
+    pollFailureCount = 0;
+    renderJob(job);
+    if (TERMINAL_STATUSES.has(job.status)) finishRun();
+    else schedulePoll();
   } catch (err) {
     console.error(err);
-    clearInterval(pollTimer); pollTimer = null;
-    isRunning = false;
-    setTranscribing(false);
-    startBtn.disabled = false;
-    startBtn.textContent = "Lancer la transcription";
-    startBtn.classList.remove("danger");
+    if (expectedJobId !== currentJobId || !isRunning) return;
+    if (err.status === 404) {
+      jobStateSpan.textContent = "Suivi introuvable";
+      jobStateSpan.dataset.status = "error";
+      showFormMessage(err.message);
+      finishRun();
+      return;
+    }
+    pollFailureCount += 1;
+    const retryDelay = Math.min(POLL_INTERVAL_MS * (2 ** Math.min(pollFailureCount, 4)), 10000);
+    jobStateSpan.textContent = "Connexion interrompue — nouvelle tentative…";
+    jobStateSpan.dataset.status = "cancelling";
+    showFormMessage(`Le suivi est temporairement indisponible : ${err.message || err}. Nouvelle tentative automatique.`, "warning");
+    schedulePoll(retryDelay);
   }
 }
 
 // ====== Submit / Start-Stop ======
+async function requestCancellation({ keepTracking = true } = {}) {
+  if (!isRunning) return true;
+  if (cancelInFlight) {
+    showFormMessage("Une demande d'annulation est déjà en cours.", "warning");
+    return false;
+  }
+
+  cancelInFlight = true;
+  setStartButton(true, { cancelling: true });
+  jobStateSpan.textContent = "Annulation en cours…";
+  jobStateSpan.dataset.status = "cancelling";
+
+  if (!currentJobId && submitAbortController) {
+    submitAbortController.abort();
+    return true;
+  }
+  if (!currentJobId) {
+    cancelInFlight = false;
+    return true;
+  }
+
+  try {
+    const res = await postWithCsrf(`/api/cancel/${encodeURIComponent(currentJobId)}`);
+    if (!res.ok) throw new Error(await readResponseError(res, `Annulation impossible (${res.status}).`));
+    const payload = await res.json();
+    const returnedStatus = payload?.status || "cancelling";
+    cancelInFlight = false;
+    jobStateSpan.textContent = STATUS_LABELS[returnedStatus] || returnedStatus;
+    jobStateSpan.dataset.status = returnedStatus;
+    if (keepTracking) {
+      if (TERMINAL_STATUSES.has(returnedStatus)) {
+        await pollStatus(currentJobId);
+      } else {
+        schedulePoll(0);
+      }
+    }
+    return true;
+  } catch (error) {
+    console.error(error);
+    cancelInFlight = false;
+    setStartButton(true);
+    showFormMessage(`Impossible de demander l'annulation : ${error.message || error}`);
+    return false;
+  }
+}
+
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
 
-  // === STOP (UI) ===
   if (isRunning) {
-    // on affiche immédiatement l'état "arrêt en cours…"
-    jobStateSpan.textContent = "arrêt en cours…";
-    startBtn.disabled = true;            // gèle le bouton pendant qu'on arrête le polling
-    if (pollTimer) clearInterval(pollTimer);
-    pollTimer = null;
-
-    // petit délai visuel pour que l'utilisateur voie l'état
-    setTimeout(() => {
-      isRunning = false;
-      setTranscribing(false);
-      startBtn.disabled = false;
-      startBtn.textContent = "Lancer la transcription";
-      startBtn.classList.remove("danger");
-      jobStateSpan.textContent = "arrêté (UI)";
-    }, 500);
-
+    await requestCancellation();
     return;
   }
 
-  // === START ===
-  if (!filesInput.files.length) {
-    alert("Ajoute au moins un fichier audio.");
-    return;
-  }
+  if (!validateSelectedFiles()) return;
 
-  // lock UI + reset affichages
   isRunning = true;
+  cancelInFlight = false;
+  currentJobId = null;
+  lastJobSnapshot = null;
+  pollFailureCount = 0;
+  displayedProgressPct = 0;
+  lastLogsText = "";
   setTranscribing(true);
-  startBtn.textContent = "Arrêter la transcription";
-  startBtn.classList.add("danger");
-  startBtn.disabled = true;      // on le réactive dès que le job démarre
+  setControlsLocked(true);
+  setStartButton(true, { uploading: true });
+  form.setAttribute("aria-busy", "true");
+  statusSection.setAttribute("aria-busy", "true");
   downloadWrap.hidden = true;
   logsPre.textContent = "";
-  filesList.innerHTML = "";
+  filesList.replaceChildren();
   statusSection.hidden = false;
-  progressBar.style.width = "0%";
-  jobStateSpan.textContent = "démarrage…";
+  setGlobalProgress(0, "pending");
+  jobStateSpan.textContent = "Téléversement et validation…";
+  jobStateSpan.dataset.status = "pending";
   jobIdSpan.textContent = "";
-  lastLogLength = 0;
+  showFormMessage("");
 
   const fd = new FormData();
   const use_api = modeSelect.value === "api";
   updateSummaryBtnLabel();
   fd.append("use_api", use_api ? "1" : "0");
-  fd.append("api_key", (apiKeyInput.value || "").trim());
+  if (use_api && (apiKeyInput.value || "").trim()) {
+    fd.append("api_key", apiKeyInput.value.trim());
+  }
   fd.append("model_label", modelSelect.value);
   fd.append("lang_label", langSelect.value);
   if (use_api) fd.append("output_type", outputTypeSelect.value);
   Array.from(filesInput.files).forEach(f => fd.append("files", f, f.name));
 
-
+  submitAbortController = new AbortController();
   try {
-    const res = await fetch("/api/transcribe", { method: "POST", body: fd });
-    if (!res.ok) throw new Error(await res.text());
+    const res = await postWithCsrf("/api/transcribe", {
+      body: fd,
+      signal: submitAbortController.signal,
+    });
+    if (!res.ok) throw new Error(await readResponseError(res, `Lancement impossible (${res.status}).`));
     const data = await res.json();
+    if (!data?.job_id) throw new Error("Le serveur n'a pas retourné d'identifiant de traitement.");
 
+    submitAbortController = null;
     currentJobId = data.job_id;
     jobIdSpan.textContent = `Job : ${currentJobId}`;
-    jobStateSpan.textContent = "en cours";
-    startBtn.disabled = false;   // on autorise l'arrêt (UI) maintenant que le job existe
-    pollTimer = setInterval(pollStatus, 1000);
+    jobStateSpan.textContent = "En file d'attente";
+    jobStateSpan.dataset.status = "pending";
+    if (use_api) apiKeyInput.value = "";
+    setStartButton(true);
+    await pollStatus(currentJobId);
   } catch (err) {
-    console.error(err);
-    alert("Erreur au lancement : " + err.message);
-    isRunning = false;
-    setTranscribing(false);
-    startBtn.disabled = false;
-    startBtn.textContent = "Lancer la transcription";
-    startBtn.classList.remove("danger");
+    if (err.name === "AbortError") {
+      if (!suppressAbortMessage) {
+        jobStateSpan.textContent = "Téléversement annulé";
+        jobStateSpan.dataset.status = "cancelled";
+        showFormMessage("Le téléversement a été annulé.", "warning");
+      }
+      suppressAbortMessage = false;
+    } else {
+      console.error(err);
+      jobStateSpan.textContent = "Échec du lancement";
+      jobStateSpan.dataset.status = "error";
+      showFormMessage(`Erreur au lancement : ${err.message || err}`);
+    }
+    finishRun();
   }
 });
 
-// ====== Réinitialiser (UI only) ======
+// ====== Réinitialiser ======
 resetBtn.addEventListener("click", async () => {
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = null;
-  currentJobId = null;
-  lastLogLength = 0;
-  isRunning = false;
-  setTranscribing(false);
+  resetBtn.disabled = true;
+  try {
+    if (isRunning) {
+      suppressAbortMessage = !currentJobId && Boolean(submitAbortController);
+      const cancellationAccepted = await requestCancellation({ keepTracking: false });
+      if (!cancellationAccepted) return;
+    }
 
-  if (supportsNativeRecording && isRecording && nativeRecordingId) {
-    await stopNativeRecording();
-  }
+    stopPolling();
+    currentJobId = null;
+    lastJobSnapshot = null;
+    lastLogsText = "";
+    pollFailureCount = 0;
+    displayedProgressPct = 0;
+    isRunning = false;
+    cancelInFlight = false;
+    submitAbortController = null;
+    setTranscribing(false);
 
-  if (!supportsNativeRecording) {
-    if (isRecording && mediaRecorder) {
+    if (supportsNativeRecording && isRecording && nativeRecordingId) {
+      await stopNativeRecording();
+    } else if (!supportsNativeRecording && isRecording && mediaRecorder) {
+      discardRecordingOnStop = true;
       try { mediaRecorder.stop(); } catch (_) { /* noop */ }
     }
+
+    stopRecordingStreams();
+    mediaRecorder = null;
+    recordingChunks = [];
+    isRecording = false;
+    lastRecordedFile = null;
+    nativeRecordingId = null;
+    setRecordButtonState(false);
+    updateRecordingHint("");
+    stopRecordTimer(true);
+
+    form.reset();
+    form.setAttribute("aria-busy", "false");
+    statusSection.setAttribute("aria-busy", "false");
+    statusSection.hidden = true;
+    logsPre.textContent = "";
+    filesList.replaceChildren();
+    setGlobalProgress(0, "pending");
+    jobIdSpan.textContent = "";
+    jobStateSpan.textContent = "En attente";
+    jobStateSpan.dataset.status = "pending";
+    downloadWrap.hidden = true;
+    summaryBtn.style.display = "none";
+    showFormMessage(configurationError);
+
+    durationRequestId += 1;
+    fillModelOptions();
+    fillLangOptions();
+    updateSummaryBtnLabel();
+    estimateNode.textContent = "";
+    totalDurationMin = 0;
+
+    setControlsLocked(false);
+    setStartButton(false);
+    if (recordBtn) recordBtn.disabled = Boolean(configurationError);
+  } finally {
+    resetBtn.disabled = false;
   }
-
-  stopRecordingStreams();
-  mediaRecorder = null;
-  recordingChunks = [];
-  isRecording = false;
-  lastRecordedFile = null;
-  nativeRecordingId = null;
-  setRecordButtonState(false);
-  if (recordBtn) {
-    recordBtn.disabled = false;
-  }
-  updateRecordingHint("");
-  stopRecordTimer(true);
-
-  // reset visuel du formulaire
-  form.reset();
-  statusSection.hidden = true;
-  logsPre.textContent = "";
-  filesList.innerHTML = "";
-  progressBar.style.width = "0%";
-  downloadWrap.hidden = true;
-  summaryBtn.style.display = "none";
-
-
-  // Remettre les options par défaut
-  fillModelOptions();
-  fillLangOptions();
-  estimateNode.textContent = "";
-  totalDurationMin = 0;
-
-  // Remettre le bouton principal
-  startBtn.disabled = false;
-  startBtn.textContent = "Lancer la transcription";
-  startBtn.classList.remove("danger");
 });
 
 // ====== Init ======
-modeSelect.addEventListener("change", () => { fillModelOptions(); updateEstimate(); updateSummaryBtnLabel(); });
+modeSelect.addEventListener("change", () => {
+  fillModelOptions();
+  updateEstimate();
+  updateSummaryBtnLabel();
+  if (filesInput.files.length) validateSelectedFiles();
+});
 modelSelect.addEventListener("change", updateEstimate);
 filesInput.addEventListener("change", computeTotalDuration);
 
 fillModelOptions();
 fillLangOptions();
 updateEstimate();
+updateSummaryBtnLabel();
+form.setAttribute("aria-busy", "false");
+statusSection.setAttribute("aria-busy", "false");
+setGlobalProgress(0, "pending");
+setStartButton(false);
+const cumulativeLimitHint = Number.isFinite(maxJobUploadMb) ? `, ${formatMegabytes(maxJobUploadMb)} Mo par lot` : "";
+filesInput.title = `Formats autorisés : ${Array.from(supportedExtensions).join(", ")}. ${maxFiles} fichiers maximum, ${maxUploadMb} Mo par fichier${cumulativeLimitHint}. En mode API : segments de ${apiChunkMinutes} minutes maximum.`;
 
 if (supportsNativeRecording) {
   updateRecordingHint("Le son système sera capturé via l'application native.");
@@ -747,6 +1229,7 @@ if (supportsNativeRecording) {
 
 if (recordBtn) {
   setRecordButtonState(false);
+  recordBtn.disabled = Boolean(configurationError);
   resetRecordTimerDisplay();
   recordBtn.addEventListener("click", async () => {
     if (isRecording) {

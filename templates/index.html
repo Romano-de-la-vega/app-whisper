@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ACIPhone</title>
+    <title>Transcripteur Whisper</title>
     <script>
       (function(){
         const saved = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
@@ -20,8 +20,8 @@
         <div class="brand">
           <img id="logo" src="/static/logo.png" alt="Logo" />
           <div>
-            <h1>Transcripteur mp3 → txt via l'IA</h1>
-            <p class="subtitle">Lot de fichiers · Local ou API OpenAI</p>
+            <h1>Transcripteur audio/vidéo → texte via l'IA</h1>
+            <p class="subtitle">Conversion MP4 automatique · Traitement local ou API OpenAI</p>
           </div>
         </div>
         <button id="toggle-theme" type="button">🌙 Mode sombre</button>
@@ -69,7 +69,7 @@
 
         <div class="field full">
           <div class="field-label-row">
-            <label for="files">Fichiers audio</label>
+            <label for="files">Fichiers audio ou vidéo</label>
             <div class="record-controls">
               <button id="record-btn" type="button" class="icon-button record">
                 <span class="dot" aria-hidden="true"></span>
@@ -78,10 +78,12 @@
               <span id="record-timer" class="record-timer">00:00:00</span>
             </div>
           </div>
-          <input id="files" name="files" type="file" multiple accept=".mp3,.wav,.m4a,.flac" />
-          <small>Formats : mp3, wav, m4a, flac</small>
+          <input id="files" name="files" type="file" multiple accept=".aac,.flac,.m4a,.mp3,.mp4,.mpga,.ogg,.wav,.webm,.mkv,.mov" />
+          <small>Formats : aac, flac, m4a, mp3, mp4, mpga, ogg, wav, webm, mkv, mov.</small>
+          <small>Les vidéos sont converties automatiquement en MP3. En mode API, l'audio est envoyé successivement en segments MP3 de 10 minutes maximum, puis recomposé.</small>
           <small id="recording-hint"></small>
           <small id="estimate"></small>
+          <div id="form-error" class="form-error" role="alert" hidden></div>
         </div>
 
         <div class="actions">
@@ -90,8 +92,8 @@
         </div>
       </form>
 
-      <section id="status" class="status" hidden>
-        <div class="progress-wrap"><div class="progress" id="progress" style="width:0%"></div></div>
+      <section id="status" class="status" aria-live="polite" hidden>
+        <div class="progress-wrap" id="progress-wrap" role="progressbar" aria-label="Progression globale" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="progress" id="progress" style="width:0%"></div></div>
         <div class="meta">
           <span id="job-id"></span>
           <span id="job-state" class="badge">en attente</span>
@@ -102,9 +104,9 @@
 
         <div id="downloads" class="actions" style="gap:.5rem;" hidden>
 
-          <button class="button ghost" id="btn-transcription" onclick="downloadTxt(currentJobId, 'transcription', true)">Télécharger la transcription (TXT)</button>
-          <button class="button ghost" id="btn-summary" style="display:none;" onclick="downloadTxt(currentJobId, 'summary', true)">Télécharger le document (TXT)</button>
-          <button class="button" id="btn-zip" onclick="downloadZip(currentJobId)">Télécharger en ZIP</button>
+          <button type="button" class="button ghost" id="btn-transcription">Télécharger la transcription (TXT)</button>
+          <button type="button" class="button ghost" id="btn-summary" style="display:none;">Télécharger le document (TXT)</button>
+          <button type="button" class="button" id="btn-zip">Télécharger en ZIP</button>
         </div>
       </section>
     </main>
@@ -121,7 +123,13 @@
         "LANGS": langs,
         "DEFAULT_MODEL_LOCAL": DEFAULT_MODEL_LOCAL,
         "DEFAULT_LANG": DEFAULT_LANG,
-        "nativeRecorderAvailable": native_recording_available
+        "nativeRecorderAvailable": native_recording_available,
+        "supportedExtensions": supported_extensions,
+        "maxUploadMb": max_upload_mb,
+        "maxJobUploadMb": max_job_upload_mb,
+        "maxFiles": max_files,
+        "apiChunkMinutes": api_chunk_minutes,
+        "csrfToken": csrf_token
       } | tojson }}
     </script>
 
