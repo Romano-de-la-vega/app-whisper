@@ -1828,6 +1828,9 @@ def _run_local(job_id: str):
                 if text:
                     full_text.append(text)
 
+                    # Affichage de la transcription en temps réel
+                    append_log(job_id, text)
+
                 set_job_progress(job_id, (idx + pct_file) / max(total, 1))
 
             out_dir = TRANS_DIR / job_id
@@ -1954,6 +1957,12 @@ def _snapshot_try_candidates(job_id: str, repo_or_list, local_dir: str) -> None:
         raise RuntimeError("huggingface_hub indisponible")
 
     class _JobAwareTqdm(tqdm):
+        def __init__(self, *args, **kwargs):
+            # huggingface_hub peut transmettre cet argument interne,
+            # mais tqdm.auto.tqdm ne le supporte pas.
+            kwargs.pop("name", None)
+            super().__init__(*args, **kwargs)
+
         def update(self, n=1):
             _raise_if_cancelled(job_id)
             return super().update(n)
