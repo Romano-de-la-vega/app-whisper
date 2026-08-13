@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-import native_recorder as recorder_module
+import audio_fix_v2.native_recorder as recorder_module
 
 
 class _StuckWorker:
