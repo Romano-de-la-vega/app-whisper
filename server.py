@@ -727,6 +727,31 @@ def _safe_upload_name(raw_name: Optional[str], index: int) -> str:
     return f"{index:03d}_{stem}{suffix}"
 
 
+def _safe_output_name(raw_name: Optional[str]) -> str:
+    """Nettoie le nom libre ou fournit un horodatage local."""
+    name = re.split(r"[\\/]", raw_name or "")[-1].strip()
+    name = re.sub(r"[\x00-\x1f<>:\"/\\|?*]", "_", name).rstrip(". ")
+    if name.lower().endswith(".txt"):
+        name = name[:-4].rstrip(". ")
+    name = re.sub(r"\s+", " ", name)[:80].rstrip(". ")
+    return name or datetime.now().astimezone().strftime("%d_%m_%Y_%Hh%M")
+
+
+def _output_filename(job: Dict[str, Any], kind: str, index: Optional[int] = None) -> str:
+    """Construit un nom de sortie sûr à partir du type et du nom demandé."""
+    output_name = job.get("output_name")
+    if not output_name:
+        files = job.get("files", [])
+        if index is not None and index < len(files) and files[index].get("output_stem"):
+            return f"{files[index]['output_stem']}_{kind}.txt"
+        return f"{kind}.txt"
+
+    name = f"{kind}_{output_name}"
+    if index is not None and len(job.get("files", [])) > 1:
+        name += f"_{index + 1:02d}"
+    return f"{name}.txt"
+
+
 async def _save_upload(upload: UploadFile, destination: Path) -> int:
     """Copie un upload par blocs et applique une limite configurable."""
     written = 0
@@ -849,6 +874,7 @@ async def transcribe_endpoint(
     model_label: str = Form(...),
     lang_label: str = Form(...),
     output_type: Optional[str] = Form(None),
+    output_name: Optional[str] = Form(None),
     files: List[UploadFile] = File(...),
 ):
     with JOBS_LOCK:
@@ -887,6 +913,8 @@ async def transcribe_endpoint(
             raise HTTPException(status_code=400, detail="Format de sortie inconnu")
     else:
         output_type = None
+
+    output_name = _safe_output_name(output_name)
 
     if not JOB_CAPACITY.acquire(blocking=False):
         raise HTTPException(status_code=429, detail="Trop de traitements en attente. Réessayez plus tard.")
@@ -959,6 +987,7 @@ async def transcribe_endpoint(
         "model": model_name,
         "lang": lang_code,
         "output_type": output_type,
+        "output_name": output_name,
         "progress": 0.0,
         "cancel_requested": False,
         "logs": [f"Job {job_id} créé avec {len(files_meta)} fichier(s)."],
@@ -1101,7 +1130,9 @@ def download_zip(job_id: str):
     job_trans_dir = TRANS_DIR / job_id
     if not job_trans_dir.exists() or not any(job_trans_dir.glob("*.txt")):
         raise HTTPException(status_code=404, detail="Transcriptions introuvables")
-    zip_path = TEMP_DIR / f"transcriptions_{job_id}.zip"
+    output_type = job.get("output_type") or "transcription"
+    archive_name = f"{output_type}_{job.get('output_name', job_id)}.zip"
+    zip_path = TEMP_DIR / f".{output_type}_{job_id}.zip"
     with DOWNLOAD_LOCK:
         if not zip_path.exists():
             archive_base = TEMP_DIR / f"transcriptions_{job_id}_{uuid.uuid4().hex}"
@@ -1109,7 +1140,7 @@ def download_zip(job_id: str):
             generated.replace(zip_path)
     return FileResponse(
         path=str(zip_path),
-        filename=zip_path.name,
+        filename=archive_name,
         media_type="application/zip",
         headers={"Cache-Control": "no-store"},
     )
@@ -1129,7 +1160,15 @@ def download_txt(job_id: str, kind: str = "transcription", merge: bool = True):
     if output_type == "transcription":
         output_type = None
 
-    if kind == "summary":
+    expected_kind = output_type if kind == "summary" else "transcription"
+    expected_files = [
+        job_trans_dir / _output_filename(job, expected_kind, index)
+        for index, _ in enumerate(job.get("files", []))
+    ] if job.get("output_name") else []
+
+    if expected_files and any(path.exists() for path in expected_files):
+        txt_files = [path for path in expected_files if path.exists()]
+    elif kind == "summary":
         if not output_type:
             raise HTTPException(status_code=404, detail="Aucun résumé disponible")
         txt_files = sorted(job_trans_dir.glob(f"*_{output_type}.txt"))
@@ -1144,8 +1183,12 @@ def download_txt(job_id: str, kind: str = "transcription", merge: bool = True):
     if not txt_files:
         raise HTTPException(status_code=404, detail="Aucun .txt trouvé")
 
-    name_root = output_type if kind == "summary" and output_type else "transcriptions"
-    download_name = f"{name_root}_{job_id}.txt"
+    name_root = output_type if kind == "summary" and output_type else "transcription"
+    download_name = (
+        _output_filename(job, name_root)
+        if job.get("output_name")
+        else f"{name_root}_{job_id}.txt"
+    )
     out_txt = TEMP_DIR / download_name
     remove_after_response = False
 
@@ -1687,7 +1730,7 @@ def _run_cloud(job_id: str, client: "OpenAI"):
         append_log(job_id, f"→ Préparation MP3 pour l'API : {fmeta['name']}")
         cleanup_dir: Optional[Path] = None
         collected_texts: List[str] = []
-        trans_file = TRANS_DIR / job_id / f"{fmeta['output_stem']}_transcription.txt"
+        trans_file = TRANS_DIR / job_id / _output_filename(job, "transcription", idx)
         try:
             source_path = Path(fmeta["path"])
             chunk_paths, cleanup_dir, detected_duration = _prepare_api_chunks(
@@ -1774,7 +1817,7 @@ def _run_cloud(job_id: str, client: "OpenAI"):
 
             out_file = trans_file
             if output_type in OUTPUT_PROMPTS and processed:
-                out_file = out_dir / f"{fmeta['output_stem']}_{output_type}.txt"
+                out_file = out_dir / _output_filename(job, output_type, idx)
                 _write_text_atomic(out_file, processed)
                 set_file_available(job_id, idx, document=True)
 
@@ -1887,7 +1930,7 @@ def _run_local(job_id: str):
             out_dir = TRANS_DIR / job_id
             out_dir.mkdir(parents=True, exist_ok=True)
             out_text = "\n".join(full_text).strip()
-            out_file = out_dir / f"{fmeta['output_stem']}_transcription.txt"
+            out_file = out_dir / _output_filename(job, "transcription", idx)
             _write_text_atomic(out_file, out_text)
 
             set_file_output(job_id, idx, str(out_file))

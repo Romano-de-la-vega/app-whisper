@@ -5,6 +5,7 @@ const apiKeyWrap = document.getElementById("api-key-wrap");
 const apiKeyInput = document.getElementById("api_key");
 const outputTypeWrap = document.getElementById("output-type-wrap");
 const outputTypeSelect = document.getElementById("output_type");
+const outputNameInput = document.getElementById("output_name");
 
 const modelSelect = document.getElementById("model");
 const langSelect = document.getElementById("lang");
@@ -118,22 +119,7 @@ downloadWrap.hidden = true;
 // ============================================================================
 
 function jobHasSummary(job) {
-  const outputType = String(job?.output_type || "").toLowerCase();
-
-  if (!outputType || outputType === "transcription") {
-    return false;
-  }
-
-  const suffix = `_${outputType}.txt`;
-
-  return (
-    Array.isArray(job?.files) &&
-    job.files.some(
-      (file) =>
-        typeof file?.output_name === "string" &&
-        file.output_name.toLowerCase().endsWith(suffix),
-    )
-  );
+  return Boolean(job?.has_documents);
 }
 
 
@@ -3821,6 +3807,11 @@ form.addEventListener(
     fd.append(
       "lang_label",
       langSelect.value,
+    );
+
+    fd.append(
+      "output_name",
+      (outputNameInput.value || "").trim(),
     );
 
     if (use_api) {

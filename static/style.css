@@ -212,6 +212,15 @@ input[type="password"] {
   color: var(--text);
 }
 
+/* Même style que les champs existants, sans modifier leur règle. */
+#output_name {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+  background: var(--input-bg);
+  color: var(--text);
+}
+
 small { color: var(--muted); }
 
 .form-error {

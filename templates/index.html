@@ -11,7 +11,7 @@
         document.documentElement.setAttribute("data-theme", saved);
       })();
     </script>
-    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/style.css?v=20260827-output-name" />
     <link rel="icon" href="/static/icon.ico" type="image/x-icon" />
     <style>
       .native-audio-panel {
@@ -139,6 +139,17 @@
         <div class="field">
           <label for="lang">Langue</label>
           <select id="lang" name="lang"></select>
+        </div>
+
+        <div class="field">
+          <label for="output_name">Nom de l'enregistrement (facultatif)</label>
+          <input
+            id="output_name"
+            name="output_name"
+            type="text"
+            maxlength="80"
+            placeholder="Ex. Réunion de lancement"
+          />
         </div>
 
         <div class="field full">

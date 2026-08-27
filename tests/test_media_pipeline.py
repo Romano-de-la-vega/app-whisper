@@ -130,6 +130,33 @@ class MediaPipelineTests(unittest.TestCase):
             server._safe_upload_name("notes.exe", 2)
         self.assertEqual(raised.exception.status_code, 415)
 
+    def test_output_name_is_sanitized_or_replaced_by_local_timestamp(self) -> None:
+        self.assertEqual(
+            server._safe_output_name(r"..\Comité projet?.txt"),
+            "Comité projet_",
+        )
+        self.assertRegex(
+            server._safe_output_name("   "),
+            r"^\d{2}_\d{2}_\d{4}_\d{2}h\d{2}$",
+        )
+
+    def test_output_filename_starts_with_type_and_handles_multiple_files(self) -> None:
+        single_job = {"output_name": "Réunion client", "files": [{}]}
+        multiple_job = {"output_name": "Réunion client", "files": [{}, {}]}
+
+        self.assertEqual(
+            server._output_filename(single_job, "compte_rendu", 0),
+            "compte_rendu_Réunion client.txt",
+        )
+        self.assertEqual(
+            server._output_filename(multiple_job, "transcription", 1),
+            "transcription_Réunion client_02.txt",
+        )
+        self.assertEqual(
+            server._output_filename(multiple_job, "transcription"),
+            "transcription_Réunion client.txt",
+        )
+
     def test_huggingface_download_uses_current_supported_arguments(self) -> None:
         calls = []
         job_id = "c" * 32
