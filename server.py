@@ -234,6 +234,10 @@ class LocalAppProtectionMiddleware:
                 await JSONResponse(
                     {"detail": "Jeton de sécurité local manquant ou invalide."},
                     status_code=403,
+                    headers={
+                        "Cache-Control": "no-store",
+                        "X-Whisper-CSRF-Refresh": "required",
+                    },
                 )(scope, receive, send)
                 return
 
@@ -339,6 +343,20 @@ def health():
         "service": "transcripteur-whisper",
         "mp3_encoder": MP3_ENCODER_ERROR is None,
     }
+
+
+@app.get("/api/security-context")
+def security_context():
+    """Renvoie le jeton du processus courant sans permettre sa mise en cache.
+
+    Une page locale peut rester ouverte pendant le redémarrage du serveur. Elle
+    utilise cette route pour remplacer automatiquement son ancien jeton avant de
+    rejouer une requête d'écriture.
+    """
+    return JSONResponse(
+        {"csrf_token": CSRF_TOKEN},
+        headers={"Cache-Control": "no-store"},
+    )
 
 # ========= Paramètres =========
 MODELS_LOCAL: Dict[str, str] = {
@@ -490,7 +508,7 @@ _ensure_vad_assets()
 # ========= Page d’accueil =========
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    return templates.TemplateResponse(
+    response = templates.TemplateResponse(
         request=request,
         name="index.html",
         context={
@@ -508,6 +526,8 @@ def index(request: Request):
             "csrf_token": CSRF_TOKEN,
         },
     )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/native/audio/devices")
@@ -558,6 +578,7 @@ def native_recording_start(
         "system_device_name": result.system_device_name,
         "microphone_device_name": result.microphone_device_name,
         "levels_url": f"/native/recordings/{result.recording_id}/levels",
+        "resumed": result.resumed,
     }
 
 

@@ -190,6 +190,7 @@ let maxJobUploadMb =
 
 let apiChunkMinutes = 10;
 let csrfToken = "";
+let csrfRefreshPromise = null;
 let configurationError = "";
 
 
@@ -1102,35 +1103,98 @@ async function readResponseError(
 }
 
 
-function postWithCsrf(
+async function refreshCsrfToken() {
+  if (!csrfRefreshPromise) {
+    csrfRefreshPromise = fetch(
+      "/api/security-context",
+      {
+        cache: "no-store",
+        credentials: "same-origin",
+      },
+    )
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(
+            "Impossible de renouveler le jeton de sécurité local.",
+          );
+        }
+
+        const payload =
+          await response.json();
+
+        const refreshedToken =
+          typeof payload.csrf_token ===
+            "string"
+            ? payload.csrf_token.trim()
+            : "";
+
+        if (!refreshedToken) {
+          throw new Error(
+            "Le serveur n'a pas fourni de jeton de sécurité local.",
+          );
+        }
+
+        csrfToken = refreshedToken;
+        configurationError = "";
+        return refreshedToken;
+      })
+      .finally(() => {
+        csrfRefreshPromise = null;
+      });
+  }
+
+  return csrfRefreshPromise;
+}
+
+
+async function postWithCsrf(
   url,
   options = {},
 ) {
   if (!csrfToken) {
-    throw new Error(
-      configurationError ||
-      "Configuration de sécurité invalide : jeton CSRF absent.",
-    );
+    await refreshCsrfToken();
   }
 
-  const headers =
-    new Headers(
-      options.headers || {},
+  const sendRequest = () => {
+    const headers =
+      new Headers(
+        options.headers || {},
+      );
+
+    headers.set(
+      CSRF_HEADER,
+      csrfToken,
     );
 
-  headers.set(
-    CSRF_HEADER,
-    csrfToken,
-  );
+    return fetch(
+      url,
+      {
+        ...options,
+        method: "POST",
+        headers,
+      },
+    );
+  };
 
-  return fetch(
-    url,
-    {
-      ...options,
-      method: "POST",
-      headers,
-    },
-  );
+  const attemptedToken = csrfToken;
+  let response = await sendRequest();
+
+  if (
+    response.status === 403 &&
+    response.headers.get(
+      "X-Whisper-CSRF-Refresh",
+    ) === "required"
+  ) {
+    if (csrfToken === attemptedToken) {
+      await refreshCsrfToken();
+    }
+
+    // One retry only: enough for a server restart, without hiding a real
+    // authorization or origin error.
+    response = await sendRequest();
+  }
+
+  return response;
 }
 
 
@@ -1835,7 +1899,11 @@ async function startNativeRecording() {
     );
 
     updateRecordingHint(
-      `Enregistrement en cours : ${
+      `${
+        data.resumed
+          ? "Enregistrement actif récupéré"
+          : "Enregistrement en cours"
+      } : ${
         data.microphone_device_name ||
         "microphone"
       } + ${
@@ -2368,12 +2436,15 @@ function finalizeRecording() {
       : "";
 
   if (!csrfToken) {
-    configurationError =
-      "Configuration de sécurité invalide : jeton CSRF absent. Rechargez la page.";
+    refreshCsrfToken().catch((error) => {
+      configurationError =
+        error?.message ||
+        "Impossible d'initialiser la sécurité locale.";
 
-    showFormMessage(
-      configurationError,
-    );
+      showFormMessage(
+        configurationError,
+      );
+    });
   }
 
   const configuredExtensions =

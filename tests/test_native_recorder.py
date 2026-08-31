@@ -1,326 +1,232 @@
-import os
+from __future__ import annotations
+
 import tempfile
 import threading
-import time
 import unittest
-import uuid
+from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-import audio_fix_v2.native_recorder as recorder_module
+import native_recorder as recorder_module
 
 
-class _StuckWorker:
-    def __init__(self):
-        self.join_calls = 0
+class _FakeSession:
+    def __init__(
+        self,
+        recording_id: str = "recording-id",
+        output_path: Path = Path("recording.wav"),
+        microphone_index: int = 1,
+        microphone_name: str = "Microphone",
+        speaker_id: str = "speaker-id",
+        speaker_name: str = "Speakers",
+        *,
+        recording: bool = False,
+        live: bool = False,
+        stop_error: Exception | None = None,
+        start_entered: threading.Event | None = None,
+        release_start: threading.Event | None = None,
+    ) -> None:
+        self.recording_id = recording_id
+        self.output_path = Path(output_path)
+        self.microphone_index = microphone_index
+        self.microphone_name = microphone_name
+        self.speaker_id = speaker_id
+        self.speaker_name = speaker_name
+        self.recording = recording
+        self.live = live
+        self.stop_error = stop_error
+        self.start_entered = start_entered
+        self.release_start = release_start
+        self.start_calls = 0
+        self.stop_calls = 0
+        self.discarded = False
 
-    def is_alive(self):
-        return True
+    def start(self) -> None:
+        self.start_calls += 1
+        if self.start_entered is not None:
+            self.start_entered.set()
+        if self.release_start is not None and not self.release_start.wait(2.0):
+            raise RuntimeError("test start timeout")
+        self.recording = True
+        self.live = True
 
-    def join(self, timeout=None):
-        self.join_calls += 1
+    def stop(self) -> recorder_module.NativeRecordingResult:
+        self.stop_calls += 1
+        if self.stop_error is not None:
+            raise self.stop_error
+        self.recording = False
+        self.live = False
+        return recorder_module.NativeRecordingResult(
+            recording_id=self.recording_id,
+            path=self.output_path,
+            duration=1.0,
+            system_device_name=self.speaker_name,
+            microphone_device_name=self.microphone_name,
+        )
 
+    def is_recording(self) -> bool:
+        return self.recording and self.live
 
-class NativeRecordingSessionTests(unittest.TestCase):
-    def setUp(self):
-        if recorder_module.np is None or recorder_module.sf is None:
-            self.skipTest("numpy et soundfile sont nécessaires à ces tests")
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp_dir.cleanup)
-        self.base_dir = Path(self.temp_dir.name)
+    def has_live_workers(self) -> bool:
+        return self.live
 
-    def _session(self, *, samplerate=8_000, channels=2):
-        output = self.base_dir / f"native_recording_{uuid.uuid4().hex}.wav"
-        with mock.patch.object(recorder_module, "sc", object()):
-            return recorder_module._RecordingSession(
-                "recording-id",
-                output,
-                "device-id",
-                samplerate,
-                channels,
-            )
-
-    def test_queue_is_bounded_and_channels_are_limited_to_stereo(self):
-        session = self._session(channels=8)
-
-        self.assertEqual(session._queue.maxsize, recorder_module._QUEUE_MAX_BLOCKS)
-        self.assertEqual(session._channels, 2)
-
-    def test_reader_applies_backpressure_and_keeps_captured_block_on_stop(self):
-        session = self._session(channels=1)
-        sample = recorder_module.np.ones((8,), dtype="float32")
-        for _ in range(recorder_module._QUEUE_MAX_BLOCKS):
-            session._queue.put_nowait(sample)
-
-        first_record_done = threading.Event()
-
-        class OneBlockRecorder:
-            calls = 0
-
-            def record(self, _blocksize):
-                self.calls += 1
-                first_record_done.set()
-                return sample
-
-        fake_recorder = OneBlockRecorder()
-        session._recorder = fake_recorder
-        reader = threading.Thread(target=session._reader_loop)
-        reader.start()
-        self.assertTrue(first_record_done.wait(1.0))
-
-        # The queue stays bounded and the reader cannot request another block.
-        time.sleep(recorder_module._QUEUE_PUT_TIMEOUT_SECONDS * 1.5)
-        self.assertTrue(reader.is_alive())
-        self.assertEqual(session._queue.qsize(), recorder_module._QUEUE_MAX_BLOCKS)
-        self.assertEqual(fake_recorder.calls, 1)
-
-        # stop_requested must not discard the block already returned by record().
-        session._stop_event.set()
-        session._queue.get_nowait()
-        reader.join(1.0)
-        self.assertFalse(reader.is_alive())
-        self.assertEqual(session._queue.qsize(), recorder_module._QUEUE_MAX_BLOCKS)
-        self.assertEqual(fake_recorder.calls, 1)
-
-    def test_stop_drains_block_returned_when_context_is_closed(self):
-        session = self._session(samplerate=8_000, channels=2)
-        entered_record = threading.Event()
-        release_record = threading.Event()
-        block = recorder_module.np.full((128, 2), 0.25, dtype="float32")
-
-        class BlockingRecorder:
-            def record(self, _blocksize):
-                entered_record.set()
-                if not release_record.wait(2.0):
-                    raise RuntimeError("test timeout")
-                return block
-
-        class ReleasingContext:
-            def __exit__(self, _exc_type, _exc, _tb):
-                release_record.set()
-
-        session._recorder = BlockingRecorder()
-        session._recorder_ctx = ReleasingContext()
-        session._writer_thread = threading.Thread(target=session._writer_loop)
-        session._reader_thread = threading.Thread(target=session._reader_loop)
-        session._writer_thread.start()
-        self.assertTrue(session._writer_ready_event.wait(1.0))
-        session._reader_thread.start()
-        self.assertTrue(entered_record.wait(1.0))
-
-        with mock.patch.object(recorder_module, "_READER_STOP_GRACE_SECONDS", 0.01):
-            result = session.stop()
-
-        self.assertEqual(session._frames_written, 128)
-        self.assertAlmostEqual(result.duration, 128 / 8_000)
-        self.assertEqual(recorder_module.sf.info(str(result.path)).frames, 128)
-
-    def test_duration_counts_frames_not_stereo_scalar_samples(self):
-        session = self._session(samplerate=48_000, channels=2)
-        session._queue.put(recorder_module.np.zeros((480, 2), dtype="float32"))
-        session._queue.put(recorder_module.np.zeros((960, 2), dtype="float32"))
-        session._reader_done_event.set()
-
-        session._writer_loop()
-        result = session.stop()
-
-        self.assertEqual(session._frames_written, 1_440)
-        self.assertAlmostEqual(result.duration, 0.03, places=6)
-
-    def test_reader_error_is_chained_from_stop(self):
-        session = self._session(channels=1)
-        original = RuntimeError("capture cassée")
-
-        class BrokenRecorder:
-            def record(self, _blocksize):
-                raise original
-
-        session._recorder = BrokenRecorder()
-        session._reader_loop()
-
-        with self.assertRaises(recorder_module.NativeRecorderError) as caught:
-            session.stop()
-        self.assertIs(caught.exception.__cause__, original)
-        self.assertIn("capture", str(caught.exception))
-
-    def test_writer_error_is_chained_from_stop(self):
-        session = self._session(channels=1)
-        original = OSError("disque plein")
-
-        class BrokenSoundFile:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, _exc_type, _exc, _tb):
-                return None
-
-            def write(self, _data):
-                raise original
-
-        fake_soundfile_module = mock.Mock()
-        fake_soundfile_module.SoundFile.return_value = BrokenSoundFile()
-        session._queue.put(recorder_module.np.ones((16,), dtype="float32"))
-        session._reader_done_event.set()
-
-        with mock.patch.object(recorder_module, "sf", fake_soundfile_module):
-            session._writer_loop()
-            with self.assertRaises(recorder_module.NativeRecorderError) as caught:
-                session.stop()
-
-        self.assertIs(caught.exception.__cause__, original)
-        self.assertIn("écriture", str(caught.exception))
-
-    def test_writer_failure_unblocks_reader_waiting_on_full_queue(self):
-        session = self._session(channels=1)
-        sample = recorder_module.np.ones((16,), dtype="float32")
-        for _ in range(recorder_module._QUEUE_MAX_BLOCKS):
-            session._queue.put_nowait(sample)
-
-        reader_started = threading.Event()
-        writer_started = threading.Event()
-        release_writer = threading.Event()
-        original = OSError("disque plein")
-
-        class Recorder:
-            def record(self, _blocksize):
-                reader_started.set()
-                return sample
-
-        class BrokenSoundFile:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, _exc_type, _exc, _tb):
-                return None
-
-            def write(self, _data):
-                writer_started.set()
-                if not release_writer.wait(1.0):
-                    raise RuntimeError("test timeout")
-                raise original
-
-        fake_soundfile_module = mock.Mock()
-        fake_soundfile_module.SoundFile.return_value = BrokenSoundFile()
-        session._recorder = Recorder()
-        session._reader_thread = threading.Thread(target=session._reader_loop)
-        session._writer_thread = threading.Thread(target=session._writer_loop)
-
-        with mock.patch.object(recorder_module, "sf", fake_soundfile_module):
-            session._reader_thread.start()
-            self.assertTrue(reader_started.wait(1.0))
-            session._writer_thread.start()
-            self.assertTrue(writer_started.wait(1.0))
-            release_writer.set()
-            session._writer_thread.join(1.0)
-            session._reader_thread.join(1.0)
-
-            self.assertFalse(session._writer_thread.is_alive())
-            self.assertFalse(session._reader_thread.is_alive())
-            self.assertLessEqual(session._queue.qsize(), recorder_module._QUEUE_MAX_BLOCKS)
-            with self.assertRaises(recorder_module.NativeRecorderError) as caught:
-                session.stop()
-
-        self.assertIs(caught.exception.__cause__, original)
-
-    def test_stuck_reader_is_reported_and_reference_is_retained(self):
-        session = self._session(channels=1)
-        stuck = _StuckWorker()
-        session._reader_thread = stuck
-
-        with mock.patch.object(recorder_module, "_THREAD_STOP_TIMEOUT_SECONDS", 0.0), mock.patch.object(
-            recorder_module, "_READER_STOP_GRACE_SECONDS", 0.0
-        ):
-            with self.assertRaisesRegex(recorder_module.NativeRecorderError, "toujours actif"):
-                session.stop()
-
-        self.assertIs(session._reader_thread, stuck)
-        self.assertGreaterEqual(stuck.join_calls, 1)
-
-    def test_corrupt_output_file_is_rejected(self):
-        session = self._session(channels=1)
-        session.output_path.write_bytes(b"not-a-wave-file")
-        session._frames_written = 1
-
-        with self.assertRaisesRegex(recorder_module.NativeRecorderError, "illisible"):
-            session.stop()
+    def discard_output(self) -> None:
+        self.discarded = True
 
 
 class NativeRecorderCoordinatorTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.base_dir = Path(self.temp_dir.name)
+        self.recorder = recorder_module.NativeRecorder(self.base_dir)
 
-    def test_pick_device_caps_multichannel_loopback_to_stereo(self):
-        class Speaker:
-            id = "speaker-id"
-            name = "speaker"
-            channels = 8
+    def _start_patches(self, session: _FakeSession) -> ExitStack:
+        def create_session(**kwargs):
+            for key, value in kwargs.items():
+                setattr(session, key, value)
+            return session
 
-        class Microphone:
-            id = "microphone-id"
-            channels = 8
+        stack = ExitStack()
+        stack.enter_context(
+            mock.patch.object(
+                self.recorder,
+                "_resolve_microphone",
+                return_value=(1, session.microphone_name),
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(
+                self.recorder,
+                "_resolve_speaker",
+                return_value=(session.speaker_id, session.speaker_name),
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(recorder_module, "_RecordingSession", side_effect=create_session)
+        )
+        return stack
 
-        fake_sc = mock.Mock()
-        fake_sc.default_speaker.return_value = Speaker()
-        fake_sc.get_microphone.return_value = Microphone()
+    def test_duplicate_start_recovers_the_active_recording(self) -> None:
+        active = _FakeSession(recording=True, live=True)
+        self.recorder._active = active
 
-        recorder = recorder_module.NativeRecorder(self.base_dir)
-        with mock.patch.object(recorder_module, "sc", fake_sc):
-            device_id, samplerate, channels = recorder._pick_device()
+        result = self.recorder.start("another-mic", "another-speaker")
 
-        self.assertEqual(device_id, "microphone-id")
-        self.assertEqual(samplerate, 48_000.0)
-        self.assertEqual(channels, 2)
+        self.assertEqual(result.recording_id, active.recording_id)
+        self.assertTrue(result.resumed)
+        self.assertIs(self.recorder._active, active)
 
-    def test_init_purges_old_orphan_but_preserves_recent_and_unrelated_files(self):
-        old_orphan = self.base_dir / f"native_recording_{uuid.uuid4().hex}.wav"
-        recent_orphan = self.base_dir / f"native_recording_{uuid.uuid4().hex}.wav"
-        unrelated = self.base_dir / "native_recording_notes.wav"
-        for path in (old_orphan, recent_orphan, unrelated):
-            path.write_bytes(b"data")
-        old_timestamp = time.time() - 7_200
-        os.utime(old_orphan, (old_timestamp, old_timestamp))
-        os.utime(unrelated, (old_timestamp, old_timestamp))
+    def test_dead_session_is_released_before_a_new_start(self) -> None:
+        dead = _FakeSession(recording=False, live=False)
+        replacement = _FakeSession(output_path=self.base_dir / "replacement.wav")
+        self.recorder._active = dead
 
-        recorder_module.NativeRecorder(self.base_dir)
+        with self._start_patches(replacement):
+            result = self.recorder.start()
 
-        self.assertFalse(old_orphan.exists())
-        self.assertTrue(recent_orphan.exists())
-        self.assertTrue(unrelated.exists())
+        self.assertFalse(result.resumed)
+        self.assertIs(self.recorder._active, replacement)
+        self.assertEqual(replacement.start_calls, 1)
+        self.assertFalse(dead.discarded)
 
-    def test_failed_stop_clears_inactive_session_but_keeps_live_one_busy(self):
-        class FailedSession:
-            recording_id = "id"
-            output_path = Path("unused.wav")
+    def test_concurrent_starts_create_only_one_session(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        session = _FakeSession(
+            output_path=self.base_dir / "concurrent.wav",
+            start_entered=entered,
+            release_start=release,
+        )
+        results: list[recorder_module.NativeRecordingResult] = []
+        errors: list[BaseException] = []
 
-            def __init__(self, live):
-                self.live = live
-                self.discarded = False
+        def start() -> None:
+            try:
+                results.append(self.recorder.start())
+            except BaseException as exc:  # pragma: no cover - assertion aid
+                errors.append(exc)
 
-            def stop(self):
-                raise recorder_module.NativeRecorderError("boom")
+        with self._start_patches(session):
+            first = threading.Thread(target=start)
+            second = threading.Thread(target=start)
+            first.start()
+            self.assertTrue(entered.wait(1.0))
+            second.start()
+            release.set()
+            first.join(2.0)
+            second.join(2.0)
 
-            def has_live_workers(self):
-                return self.live
+        self.assertFalse(errors)
+        self.assertEqual(len(results), 2)
+        self.assertEqual({result.recording_id for result in results}, {session.recording_id})
+        self.assertEqual(sum(result.resumed for result in results), 1)
+        self.assertEqual(session.start_calls, 1)
 
-            def discard_output(self):
-                self.discarded = True
+    def test_failed_stop_releases_dead_session_and_preserves_recovery_files(self) -> None:
+        session = _FakeSession(
+            recording=False,
+            live=False,
+            stop_error=recorder_module.NativeRecorderError("mix failed"),
+        )
+        self.recorder._active = session
 
-        recorder = recorder_module.NativeRecorder(self.base_dir)
-        dead_session = FailedSession(live=False)
-        recorder._active = dead_session
-        with self.assertRaises(recorder_module.NativeRecorderError):
-            recorder.stop()
-        self.assertIsNone(recorder._active)
-        self.assertTrue(dead_session.discarded)
+        with self.assertRaisesRegex(recorder_module.NativeRecorderError, "mix failed"):
+            self.recorder.stop(session.recording_id)
 
-        live_session = FailedSession(live=True)
-        recorder._active = live_session
-        with self.assertRaises(recorder_module.NativeRecorderError):
-            recorder.stop()
-        self.assertIs(recorder._active, live_session)
-        self.assertFalse(live_session.discarded)
+        self.assertIsNone(self.recorder._active)
+        self.assertFalse(session.discarded)
+
+    def test_failed_stop_keeps_a_genuinely_live_session_for_retry(self) -> None:
+        session = _FakeSession(
+            recording=False,
+            live=True,
+            stop_error=recorder_module.NativeRecorderError("worker stuck"),
+        )
+        self.recorder._active = session
+
+        with self.assertRaisesRegex(recorder_module.NativeRecorderError, "worker stuck"):
+            self.recorder.stop(session.recording_id)
+
+        self.assertIs(self.recorder._active, session)
+
+    def test_stop_retry_returns_the_completed_result(self) -> None:
+        session = _FakeSession(recording=True, live=True, output_path=self.base_dir / "done.wav")
+        self.recorder._active = session
+
+        first = self.recorder.stop(session.recording_id)
+        second = self.recorder.stop(session.recording_id)
+
+        self.assertIs(first, second)
+        self.assertEqual(session.stop_calls, 1)
+        self.assertIsNone(self.recorder._active)
+
+
+class NativeRecordingSessionStateTests(unittest.TestCase):
+    def _bare_session(self) -> recorder_module._RecordingSession:
+        session = object.__new__(recorder_module._RecordingSession)
+        session._mic_stream = None
+        session._system_reader_thread = None
+        session._sources = {}
+        session._start_ts = 1.0
+        session._stop_event = threading.Event()
+        return session
+
+    def test_active_microphone_stream_counts_as_a_live_capture_resource(self) -> None:
+        session = self._bare_session()
+        session._mic_stream = SimpleNamespace(active=True)
+
+        self.assertTrue(session.has_live_workers())
+        self.assertTrue(session.is_recording())
+
+    def test_stop_request_makes_session_non_recording_even_if_worker_is_stuck(self) -> None:
+        session = self._bare_session()
+        session._mic_stream = SimpleNamespace(active=True)
+        session._stop_event.set()
+
+        self.assertTrue(session.has_live_workers())
+        self.assertFalse(session.is_recording())
 
 
 if __name__ == "__main__":

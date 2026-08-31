@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -28,6 +30,7 @@ class HttpApiTests(unittest.IsolatedAsyncioTestCase):
         page = await self.client.get("/")
         script = await self.client.get("/static/app.js")
         self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.headers["cache-control"], "no-store")
         self.assertIn("Conversion MP4 automatique", page.text)
         self.assertEqual(script.status_code, 200)
         self.assertIn("requestCancellation", script.text)
@@ -68,6 +71,51 @@ class HttpApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(rejected.status_code, 403)
         self.assertEqual(accepted.status_code, 404)
+
+    async def test_security_context_refreshes_a_token_after_server_restart(self) -> None:
+        stale_token = server.CSRF_TOKEN
+        refreshed_token = "new-process-token"
+        missing_job_id = "e" * 32
+
+        with patch.object(server, "CSRF_TOKEN", refreshed_token):
+            rejected = await self.client.post(
+                f"/api/cancel/{missing_job_id}",
+                headers={"X-Whisper-CSRF": stale_token},
+            )
+            context = await self.client.get("/api/security-context")
+            accepted = await self.client.post(
+                f"/api/cancel/{missing_job_id}",
+                headers={"X-Whisper-CSRF": context.json()["csrf_token"]},
+            )
+
+        self.assertEqual(rejected.status_code, 403)
+        self.assertEqual(rejected.headers["x-whisper-csrf-refresh"], "required")
+        self.assertEqual(context.status_code, 200)
+        self.assertEqual(context.headers["cache-control"], "no-store")
+        self.assertEqual(context.json()["csrf_token"], refreshed_token)
+        self.assertEqual(accepted.status_code, 404)
+
+    async def test_native_start_reports_an_idempotently_recovered_session(self) -> None:
+        fake_recorder = SimpleNamespace()
+        fake_recorder.start = lambda **_kwargs: SimpleNamespace(
+            recording_id="a" * 32,
+            path=Path("unused.wav"),
+            duration=0.0,
+            system_device_name="Speakers",
+            microphone_device_name="Microphone",
+            resumed=True,
+        )
+
+        with patch.object(server, "NATIVE_RECORDER", fake_recorder):
+            response = await self.client.post(
+                "/native/recordings/start",
+                data={"microphone_id": "sd:1", "speaker_id": "speaker-id"},
+                headers={"X-Whisper-CSRF": server.CSRF_TOKEN},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["resumed"])
+        self.assertEqual(response.json()["recording_id"], "a" * 32)
 
     async def test_chunked_body_without_content_length_is_bounded(self) -> None:
         boundary = "whisper-test-boundary"

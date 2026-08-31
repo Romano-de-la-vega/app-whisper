@@ -155,6 +155,8 @@ class NativeRecordingResult:
 
     microphone_device_name: str = ""
 
+    resumed: bool = False
+
 
 
 @dataclass
@@ -494,6 +496,22 @@ class _RecordingSession:
 
     def has_live_workers(self) -> bool:
 
+        microphone_stream = self._mic_stream
+
+        if microphone_stream is not None:
+
+            try:
+
+                if bool(microphone_stream.active):
+
+                    return True
+
+            except Exception:
+
+                # PortAudio may not expose a reliable state while closing.
+
+                pass
+
         if self._system_reader_thread is not None and self._system_reader_thread.is_alive():
 
             return True
@@ -505,6 +523,18 @@ class _RecordingSession:
                 return True
 
         return False
+
+    def is_recording(self) -> bool:
+
+        return (
+
+            self._start_ts is not None
+
+            and not self._stop_event.is_set()
+
+            and self.has_live_workers()
+
+        )
 
     def discard_output(self) -> None:
 
@@ -1290,11 +1320,48 @@ class NativeRecorder:
 
     ) -> NativeRecordingResult:
 
+        # Opening WASAPI can take a moment. Serializing the full start avoids a
+
+        # second request mistaking a half-created session for an abandoned one.
         with self._lock:
 
-            if self._active is not None:
+            active = self._active
 
-                raise NativeRecorderBusy("Un enregistrement est déjà en cours.")
+            if active is not None:
+
+                if active.is_recording():
+
+                    # Idempotent retry: recover the id after a lost response,
+
+                    # a double click or a page reload during capture.
+                    return NativeRecordingResult(
+
+                        recording_id=active.recording_id,
+
+                        path=active.output_path,
+
+                        duration=0.0,
+
+                        system_device_name=active.speaker_name,
+
+                        microphone_device_name=active.microphone_name,
+
+                        resumed=True,
+
+                    )
+
+                if active.has_live_workers():
+
+                    raise NativeRecorderBusy(
+
+                        "La finalisation de l'enregistrement précédent est encore en cours."
+
+                    )
+
+                # A failed finalization used to leave this dead object active
+
+                # forever. Keep its temporary WAVs, but release the coordinator.
+                self._active = None
 
             self._purge_old_files_locked()
 
@@ -1324,65 +1391,77 @@ class NativeRecorder:
 
             self._active = session
 
-        try:
+            try:
 
-            session.start()
+                session.start()
 
-        except Exception:
-
-            with self._lock:
+            except Exception:
 
                 if self._active is session and not session.has_live_workers():
 
                     self._active = None
 
-            session.discard_output()
+                session.discard_output()
 
-            raise
+                raise
 
-        return NativeRecordingResult(
+            return NativeRecordingResult(
 
-            recording_id=recording_id,
+                recording_id=recording_id,
 
-            path=output_path,
+                path=output_path,
 
-            duration=0.0,
+                duration=0.0,
 
-            system_device_name=speaker_name,
+                system_device_name=speaker_name,
 
-            microphone_device_name=mic_name,
+                microphone_device_name=mic_name,
 
-        )
+            )
 
     def stop(self, recording_id: Optional[str] = None) -> NativeRecordingResult:
 
+        # A retried stop must not mix/write the same output concurrently.
         with self._lock:
 
             session = self._active
 
             if session is None:
 
+                completed = self._completed.get(recording_id or "")
+
+                if completed is not None:
+
+                    return completed
+
                 raise NativeRecorderNotRunning("Aucun enregistrement natif en cours.")
 
             if recording_id and recording_id != session.recording_id:
 
+                completed = self._completed.get(recording_id)
+
+                if completed is not None:
+
+                    return completed
+
                 raise NativeRecorderNotRunning("Identifiant d'enregistrement invalide.")
 
-        try:
+            try:
 
-            result = session.stop()
+                result = session.stop()
 
-        except Exception:
+            except Exception:
 
-            # Destructive cleanup here used to erase the only recoverable audio.
+                # Keep a genuinely live worker attached so stop() can be
 
-            # Keep the session and its temporary source WAVs so stop() can be
+                # retried. Once capture resources are dead, release the slot
 
-            # retried and manual recovery remains possible.
+                # while preserving the temporary recovery WAVs.
+                if self._active is session and not session.has_live_workers():
 
-            raise
+                    self._active = None
 
-        with self._lock:
+                raise
 
             if self._active is session:
 
@@ -1390,7 +1469,7 @@ class NativeRecorder:
 
             self._completed[result.recording_id] = result
 
-        return result
+            return result
 
     def get_levels(self, recording_id: str) -> Optional[Dict[str, Any]]:
 
