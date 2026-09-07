@@ -23,7 +23,9 @@ models/models--*/
 # Build / distribution
 build/
 dist/
-*.spec
+*.egg-info/
+.ruff_cache/
+*.bak
 
 # Exécutables embarqués optionnels
 ffmpeg.exe

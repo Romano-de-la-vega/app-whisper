@@ -5,7 +5,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import server
+from transcripteur_whisper.services import document_service as document
+from transcripteur_whisper.services.executor import DaemonJobExecutor
 
 
 def completed_response(text: str) -> SimpleNamespace:
@@ -33,11 +34,11 @@ class DocumentPipelineTests(unittest.TestCase):
         client = FakeClient(lambda _index, _kwargs: completed_response("Résumé final"))
 
         with (
-            patch.object(server, "DOCUMENT_MODEL", "gpt-document-test"),
-            patch.object(server, "DOCUMENT_CHUNK_CHARS", 1_000),
-            patch.object(server, "DOCUMENT_FINAL_OUTPUT_TOKENS", 777),
+            patch.object(document, "DOCUMENT_MODEL", "gpt-document-test"),
+            patch.object(document, "DOCUMENT_CHUNK_CHARS", 1_000),
+            patch.object(document, "DOCUMENT_FINAL_OUTPUT_TOKENS", 777),
         ):
-            result = server._generate_document(client, "resume", transcript)
+            result = document.generate_document(client, "resume", transcript)
 
         self.assertEqual(result, "Résumé final")
         self.assertEqual(len(client.responses.calls), 1)
@@ -73,12 +74,12 @@ class DocumentPipelineTests(unittest.TestCase):
 
         client = FakeClient(responder)
         with (
-            patch.object(server, "DOCUMENT_MODEL", "gpt-long-test"),
-            patch.object(server, "DOCUMENT_CHUNK_CHARS", 14),
-            patch.object(server, "DOCUMENT_MAP_OUTPUT_TOKENS", 321),
-            patch.object(server, "DOCUMENT_FINAL_OUTPUT_TOKENS", 654),
+            patch.object(document, "DOCUMENT_MODEL", "gpt-long-test"),
+            patch.object(document, "DOCUMENT_CHUNK_CHARS", 14),
+            patch.object(document, "DOCUMENT_MAP_OUTPUT_TOKENS", 321),
+            patch.object(document, "DOCUMENT_FINAL_OUTPUT_TOKENS", 654),
         ):
-            result = server._generate_document(client, "compte_rendu", transcript)
+            result = document.generate_document(client, "compte_rendu", transcript)
 
         self.assertEqual(result, "DOCUMENT FINAL COMPLET")
         calls = client.responses.calls
@@ -116,7 +117,7 @@ class DocumentPipelineTests(unittest.TestCase):
             with self.subTest(expected_message=expected_message):
                 client = FakeClient(lambda _index, _kwargs, value=response: value)
                 with self.assertRaisesRegex(RuntimeError, expected_message):
-                    server._generate_document(client, "resume", "Texte court")
+                    document.generate_document(client, "resume", "Texte court")
                 self.assertEqual(len(client.responses.calls), 1)
 
     def test_cancellation_after_response_discards_the_result(self) -> None:
@@ -134,7 +135,7 @@ class DocumentPipelineTests(unittest.TestCase):
 
         client = FakeClient(lambda _index, _kwargs: completed_response("Résultat à ignorer"))
         with self.assertRaises(CancelledAfterResponse) as raised:
-            server._generate_document(
+            document.generate_document(
                 client,
                 "resume",
                 "Texte court",
@@ -147,10 +148,10 @@ class DocumentPipelineTests(unittest.TestCase):
 
     def test_split_text_uses_the_current_dynamic_default(self) -> None:
         text = "ABCDEFGHIJ"
-        with patch.object(server, "DOCUMENT_CHUNK_CHARS", 4):
-            chunks_of_four = server._split_text_for_model(text)
-        with patch.object(server, "DOCUMENT_CHUNK_CHARS", 3):
-            chunks_of_three = server._split_text_for_model(text)
+        with patch.object(document, "DOCUMENT_CHUNK_CHARS", 4):
+            chunks_of_four = document.split_text_for_model(text)
+        with patch.object(document, "DOCUMENT_CHUNK_CHARS", 3):
+            chunks_of_three = document.split_text_for_model(text)
 
         self.assertEqual(chunks_of_four, ["ABCD", "EFGH", "IJ"])
         self.assertEqual(chunks_of_three, ["ABC", "DEF", "GHI", "J"])
@@ -164,8 +165,8 @@ class DocumentPipelineTests(unittest.TestCase):
             (3, 4, "cc"),
         ]
 
-        with patch.object(server, "DOCUMENT_CHUNK_CHARS", 10):
-            groups = server._group_document_notes(notes)
+        with patch.object(document, "DOCUMENT_CHUNK_CHARS", 10):
+            groups = document.group_document_notes(notes)
 
         self.assertEqual(groups, [notes[:2], notes[2:]])
         self.assertEqual([note for group in groups for note in group], notes)
@@ -176,7 +177,7 @@ class DocumentPipelineTests(unittest.TestCase):
 
 class DaemonJobExecutorTests(unittest.TestCase):
     def test_workers_are_daemon_threads(self) -> None:
-        executor = server.DaemonJobExecutor(2, "daemon-test")
+        executor = DaemonJobExecutor(2, "daemon-test")
         try:
             self.assertEqual(len(executor._threads), 2)
             self.assertTrue(all(worker.daemon for worker in executor._threads))
@@ -185,7 +186,7 @@ class DaemonJobExecutorTests(unittest.TestCase):
             executor.shutdown(wait=True, cancel_futures=True)
 
     def test_shutdown_cancels_pending_future_and_runs_callback_once(self) -> None:
-        executor = server.DaemonJobExecutor(1, "cancel-test")
+        executor = DaemonJobExecutor(1, "cancel-test")
         started = threading.Event()
         release = threading.Event()
         callback_called = threading.Event()
@@ -221,7 +222,7 @@ class DaemonJobExecutorTests(unittest.TestCase):
         self.assertTrue(all(not worker.is_alive() for worker in executor._threads))
 
     def test_shutdown_wait_false_returns_while_running_task_is_blocked(self) -> None:
-        executor = server.DaemonJobExecutor(1, "nonblocking-test")
+        executor = DaemonJobExecutor(1, "nonblocking-test")
         started = threading.Event()
         release = threading.Event()
         shutdown_returned = threading.Event()

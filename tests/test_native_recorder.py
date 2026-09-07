@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-import native_recorder as recorder_module
+from transcripteur_whisper.audio import native_recorder as recorder_module
 
 
 class _FakeSession:
